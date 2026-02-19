@@ -121,7 +121,7 @@ class SettingsPanel(Container):
                 memory=self.app.memory,
             )
         except Exception:
-            pass
+            logger.debug("Could not refresh stats panel after settings update")
 
     def _write_env(self) -> None:
         """Update .env file with current editable settings."""

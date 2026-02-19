@@ -178,7 +178,7 @@ class VelorumApp(App):
                 self._refresh_stats()
 
                 # Engagement check every 3rd cycle
-                if self._cycle % 3 == 0:
+                if self._cycle % self.settings.engagement_check_interval_cycles == 0:
                     try:
                         stats.set_status("Checking engagement")
                         await check_engagement(self.client, self.memory)

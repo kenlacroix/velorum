@@ -28,6 +28,21 @@ def test_numeric_digits():
     assert result == "15.00"
 
 
-def test_insufficient_numbers_returns_zero():
+def test_insufficient_numbers_returns_none():
     result = solve_challenge("no numbers here at all")
-    assert result == "0.00"
+    assert result is None
+
+
+def test_obfuscated_subtraction():
+    result = solve_challenge("A] lO^bSt-Er S[wImS aT/ tW,eNtY, sL|oWs b!Y fI;vE")
+    assert result == "15.00"
+
+
+def test_obfuscated_addition():
+    result = solve_challenge("cR^aB c-rA|wLs aT tEn, sP!eEdS bY fIfTeEn")
+    assert result == "25.00"
+
+
+def test_division_by_zero_returns_none():
+    result = solve_challenge("fish has ten, divides by zero")
+    assert result is None

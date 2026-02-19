@@ -15,7 +15,7 @@ from velorum.conversations import ConversationMessage
 from velorum.llm.base import LLMProvider
 from velorum.memory import Memory
 from velorum.moltbook.client import MoltbookClient
-from velorum.moltbook.models import Comment, Decision
+from velorum.moltbook.models import Decision
 from velorum.moltbook.verification import solve_challenge
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ def init_components(
         provider=settings.llm_provider,
         model=settings.llm_model,
         api_key=api_key,
+        max_tokens=settings.llm_max_tokens,
     )
     memory = Memory(persist_path=settings.memory_file, agent_name=settings.agent_name)
     brain = Brain(llm=llm, memory=memory, soul=soul)
@@ -54,6 +55,7 @@ def init_components(
         base_url=settings.moltbook_base_url,
         api_key=settings.moltbook_api_key,
         app_key=settings.moltbook_app_key,
+        timeout=settings.http_timeout_seconds,
     )
 
     return client, brain, controller, memory
@@ -195,6 +197,11 @@ async def check_conversations(
                     result.verification.challenge_text[:80],
                 )
                 answer = solve_challenge(result.verification.challenge_text)
+                if answer is None:
+                    logger.error(
+                        "Cannot solve challenge — skipping to avoid ban strike"
+                    )
+                    continue
                 verify_resp = await client.submit_verification(
                     verification_code=result.verification.verification_code,
                     answer=answer,
@@ -263,7 +270,8 @@ async def run_cycle(
 
     # Phase 2: Fetch feed and make a decision
     try:
-        posts = await client.get_feed()
+        feed_limit = settings.feed_limit if settings else 15
+        posts = await client.get_feed(limit=feed_limit)
     except Exception:
         logger.exception("Failed to fetch feed")
         return
@@ -342,6 +350,12 @@ async def _handle_respond(
                 result.verification.challenge_text[:80],
             )
             answer = solve_challenge(result.verification.challenge_text)
+            if answer is None:
+                logger.error(
+                    "Cannot solve challenge for comment on %s — skipping to avoid ban strike",
+                    decision.post_id,
+                )
+                return False
             verify_resp = await client.submit_verification(
                 verification_code=result.verification.verification_code,
                 answer=answer,
@@ -440,6 +454,11 @@ async def _handle_post(
                 result.verification.challenge_text[:80],
             )
             answer = solve_challenge(result.verification.challenge_text)
+            if answer is None:
+                logger.error(
+                    "Cannot solve challenge for post — skipping to avoid ban strike"
+                )
+                return False
             verify_resp = await client.submit_verification(
                 verification_code=result.verification.verification_code,
                 answer=answer,
@@ -568,7 +587,7 @@ async def main() -> None:
             await run_cycle(client, brain, controller, memory, settings)
 
             # Engagement check every 3rd cycle
-            if cycle % 3 == 0:
+            if cycle % settings.engagement_check_interval_cycles == 0:
                 await check_engagement(client, memory)
 
             # Reflection

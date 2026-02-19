@@ -22,8 +22,18 @@ class Settings(BaseSettings):
     moltbook_app_key: str = ""
     moltbook_base_url: str = "https://www.moltbook.com/api/v1"
 
+    # LLM
+    llm_max_tokens: int = 1024
+
+    # HTTP
+    http_timeout_seconds: int = 30
+
+    # Feed
+    feed_limit: int = 15
+
     # Agent behavior — comments
     confidence_threshold: int = 7
+    engagement_check_interval_cycles: int = 3
     max_responses_per_hour: int = 2
     cycle_interval_seconds: int = 300
     reflection_interval_cycles: int = 10

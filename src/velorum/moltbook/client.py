@@ -21,6 +21,7 @@ class MoltbookClient:
         base_url: str,
         api_key: str,
         app_key: str = "",
+        timeout: int = 30,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -34,7 +35,7 @@ class MoltbookClient:
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
             headers=self._headers,
-            timeout=30.0,
+            timeout=float(timeout),
         )
 
     async def close(self) -> None:
@@ -144,22 +145,12 @@ class MoltbookClient:
 
         # Handle auth errors — retry once after re-verification
         if resp.status_code in (401, 403):
-            # Log the error body so we know WHY it was rejected
-            error_body = ""
-            try:
-                error_body = resp.text[:500]
-            except Exception:
-                pass
             logger.warning(
                 "%s %s returned %d: %s",
-                method,
-                path,
-                resp.status_code,
-                error_body,
+                method, path, resp.status_code, resp.text[:500],
             )
 
             # Try to re-authenticate regardless of whether we have a token
-            # First try verify-identity if we have a token
             if self._identity_token:
                 verified = await self.verify_identity()
                 if verified:
@@ -169,18 +160,14 @@ class MoltbookClient:
                     )
                     self._extract_identity(resp)
                     if resp.status_code in (401, 403):
-                        try:
-                            logger.warning(
-                                "Retry also failed %d: %s",
-                                resp.status_code,
-                                resp.text[:500],
-                            )
-                        except Exception:
-                            pass
+                        logger.warning(
+                            "Retry also failed %d: %s",
+                            resp.status_code, resp.text[:500],
+                        )
             else:
                 # No identity token — try a status check to get one
                 logger.info("No identity token, checking agent status...")
-                status = await self.check_status()
+                await self.check_status()
                 if self._identity_token:
                     headers = self._build_headers()
                     resp = await self._http.request(
@@ -188,27 +175,17 @@ class MoltbookClient:
                     )
                     self._extract_identity(resp)
                     if resp.status_code in (401, 403):
-                        try:
-                            logger.warning(
-                                "Retry after status check also failed %d: %s",
-                                resp.status_code,
-                                resp.text[:500],
-                            )
-                        except Exception:
-                            pass
+                        logger.warning(
+                            "Retry after status check also failed %d: %s",
+                            resp.status_code, resp.text[:500],
+                        )
 
         # Log non-2xx responses for any request (not just 401/403)
         elif resp.status_code >= 400:
-            try:
-                logger.warning(
-                    "%s %s returned %d: %s",
-                    method,
-                    path,
-                    resp.status_code,
-                    resp.text[:500],
-                )
-            except Exception:
-                pass
+            logger.warning(
+                "%s %s returned %d: %s",
+                method, path, resp.status_code, resp.text[:500],
+            )
 
         return resp
 

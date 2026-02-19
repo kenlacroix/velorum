@@ -77,7 +77,7 @@ def _detect_operation(text: str) -> str:
     return "add"  # default fallback
 
 
-def solve_challenge(challenge: str) -> str:
+def solve_challenge(challenge: str) -> str | None:
     """Solve an obfuscated math challenge and return the answer as a 2-decimal string.
 
     Steps:
@@ -86,7 +86,10 @@ def solve_challenge(challenge: str) -> str:
     3. Detect the math operation
     4. Compute and format to 2 decimal places
 
-    Returns the answer formatted to 2 decimal places (e.g., "15.00").
+    Returns the answer formatted to 2 decimal places (e.g., "15.00"),
+    or None if the challenge could not be parsed. Callers MUST check
+    for None and skip submission — submitting a wrong answer counts
+    toward the 10-strike ban.
     """
     logger.info("Raw challenge: %r", challenge)
 
@@ -96,14 +99,18 @@ def solve_challenge(challenge: str) -> str:
     numbers = _extract_numbers(cleaned)
     if len(numbers) < 2:
         logger.error(
-            "Could not extract enough numbers from challenge: %r (cleaned: %r)",
+            "CANNOT SOLVE — not enough numbers in challenge: %r (cleaned: %r)",
             challenge,
             cleaned,
         )
-        return "0.00"
+        return None
 
     a, b = numbers[0], numbers[1]
     op = _detect_operation(cleaned)
+
+    if op == "divide" and b == 0:
+        logger.error("CANNOT SOLVE — division by zero in challenge: %r", challenge)
+        return None
 
     if op == "add":
         result = a + b
@@ -112,7 +119,7 @@ def solve_challenge(challenge: str) -> str:
     elif op == "multiply":
         result = a * b
     elif op == "divide":
-        result = a / b if b != 0 else 0.0
+        result = a / b
     else:
         result = a + b
 

@@ -7,9 +7,10 @@ from pathlib import Path
 
 import httpx
 
+from velorum.config import Settings
 from velorum.moltbook.auth import register_agent
 
-MOLTBOOK_BASE_URL = "https://www.moltbook.com/api/v1"
+MOLTBOOK_BASE_URL = Settings.model_fields["moltbook_base_url"].default
 
 DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5-20250929",

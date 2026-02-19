@@ -24,11 +24,20 @@ class Controller:
         self._post_timestamps: list[float] = []
         self._reply_timestamps: list[float] = []
 
+    def _prune_timestamps(self) -> None:
+        """Remove timestamps older than 24 hours to prevent unbounded growth."""
+        cutoff = time.time() - 86400
+        self._response_timestamps = [t for t in self._response_timestamps if t > cutoff]
+        self._post_timestamps = [t for t in self._post_timestamps if t > cutoff]
+        self._reply_timestamps = [t for t in self._reply_timestamps if t > cutoff]
+
     def validate(self, decision: Decision) -> bool:
         """Check whether a decision passes all guardrails.
 
         Returns True if the action is approved, False if blocked.
         """
+        self._prune_timestamps()
+
         if decision.action == "OBSERVE":
             logger.info("Controller: OBSERVE — no action needed")
             return True
