@@ -1,0 +1,149 @@
+/* Velorum TUI Dashboard Layout */
+
+Screen {
+    layout: grid;
+    grid-size: 2 2;
+    grid-columns: 1fr 2fr;
+    grid-rows: 2fr 1fr;
+}
+
+/* ── Header ─────────────────────────────────────────── */
+
+Header {
+    background: $primary-darken-3;
+}
+
+/* ── Stats Panel (top-left) ─────────────────────────── */
+
+StatsPanel {
+    column-span: 1;
+    row-span: 1;
+    border: round $primary;
+    border-title-color: $text;
+    border-title-style: bold;
+    padding: 0 1;
+    height: 100%;
+    overflow-y: auto;
+}
+
+StatsPanel Static {
+    height: 1;
+    margin: 0;
+    padding: 0;
+}
+
+#stat-divider, #stat-divider2 {
+    color: $surface-lighten-2;
+}
+
+/* ── Activity Log (top-right) ───────────────────────── */
+
+ActivityLog {
+    column-span: 1;
+    row-span: 1;
+    border: round $primary;
+    border-title-color: $text;
+    border-title-style: bold;
+    height: 100%;
+}
+
+ActivityLog RichLog {
+    height: 100%;
+    scrollbar-size: 1 1;
+}
+
+/* ── Bottom Pane (full width, tabbed) ───────────────── */
+
+#bottom-pane {
+    column-span: 2;
+    row-span: 1;
+    height: 100%;
+}
+
+#bottom-pane TabbedContent {
+    height: 100%;
+}
+
+#bottom-pane ContentSwitcher {
+    height: 1fr;
+}
+
+#bottom-pane TabPane {
+    height: 100%;
+    padding: 0;
+}
+
+/* ── Soul Editor ────────────────────────────────────── */
+
+SoulEditor {
+    height: 100%;
+    padding: 0;
+}
+
+SoulEditor TextArea {
+    height: 1fr;
+}
+
+SoulEditor .status-bar {
+    dock: bottom;
+    height: 1;
+    padding: 0 2;
+    background: $surface;
+}
+
+SoulEditor .status-saved {
+    color: $success;
+}
+
+SoulEditor .status-modified {
+    color: $warning;
+}
+
+/* ── Settings Panel ─────────────────────────────────── */
+
+SettingsPanel {
+    height: 100%;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+SettingsPanel .setting-row {
+    height: 3;
+    align: left middle;
+}
+
+SettingsPanel .setting-label {
+    width: 24;
+    padding: 0 1 0 0;
+    content-align-vertical: middle;
+}
+
+SettingsPanel .setting-input {
+    width: 12;
+}
+
+SettingsPanel .setting-unit {
+    width: auto;
+    padding: 0 0 0 1;
+    color: $text-muted;
+    content-align-vertical: middle;
+}
+
+SettingsPanel .readonly-section {
+    margin-top: 1;
+}
+
+SettingsPanel .readonly-label {
+    color: $text-muted;
+    height: 1;
+}
+
+SettingsPanel Button {
+    margin-top: 1;
+}
+
+/* ── Footer ─────────────────────────────────────────── */
+
+Footer {
+    background: $surface;
+}
