@@ -24,6 +24,8 @@ EDITABLE_SETTINGS = [
     ("min_post_interval_seconds", "Post cooldown", 60, 86400, "sec"),
     ("cycle_interval_seconds", "Cycle interval", 10, 3600, "sec"),
     ("reflection_interval_cycles", "Reflect every", 1, 100, "cycles"),
+    ("max_conversation_checks_per_cycle", "Conv checks/cycle", 1, 50, ""),
+    ("max_engagement_checks_per_cycle", "Engage checks/cycle", 1, 50, ""),
 ]
 
 
@@ -137,6 +139,8 @@ class SettingsPanel(Container):
             "min_post_interval_seconds": "MIN_POST_INTERVAL_SECONDS",
             "cycle_interval_seconds": "CYCLE_INTERVAL_SECONDS",
             "reflection_interval_cycles": "REFLECTION_INTERVAL_CYCLES",
+            "max_conversation_checks_per_cycle": "MAX_CONVERSATION_CHECKS_PER_CYCLE",
+            "max_engagement_checks_per_cycle": "MAX_ENGAGEMENT_CHECKS_PER_CYCLE",
         }
 
         for attr, env_key in env_keys.items():

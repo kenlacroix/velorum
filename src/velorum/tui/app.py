@@ -46,6 +46,7 @@ class VelorumApp(App):
         missions: object | None = None,
         strategy: object | None = None,
         experiments: object | None = None,
+        submolts: object | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
@@ -56,6 +57,7 @@ class VelorumApp(App):
         self.missions = missions
         self.strategy = strategy
         self.experiments = experiments
+        self.submolts = submolts
         self._paused = False
         self._cycle = 0
         self._force_event = asyncio.Event()
@@ -166,6 +168,18 @@ class VelorumApp(App):
             except Exception:
                 logger.warning("Data refresh failed at startup")
 
+        # Discover and subscribe to submolts
+        if not self.client.is_banned and self.submolts:
+            try:
+                from velorum.main import discover_submolts
+                if self.submolts.needs_discovery(
+                    self.settings.submolt_discovery_interval_cycles,
+                    self.settings.cycle_interval_seconds,
+                ):
+                    await discover_submolts(self.client, self.submolts, self.settings)
+            except Exception:
+                logger.warning("Submolt discovery failed at startup")
+
         # Plan mission if needed
         if self.missions and self.missions.active_mission:
             if self.missions.active_mission.status == "planning":
@@ -253,6 +267,7 @@ class VelorumApp(App):
                         self.missions,
                         self.strategy,
                         self.experiments,
+                        self.submolts,
                     )
 
                     # Check if cycle detected a ban
@@ -295,7 +310,7 @@ class VelorumApp(App):
                 if self._cycle % self.settings.engagement_check_interval_cycles == 0:
                     try:
                         stats.set_status("Checking engagement")
-                        await check_engagement(self.client, self.memory)
+                        await check_engagement(self.client, self.memory, max_checks=self.settings.max_engagement_checks_per_cycle)
                     except Exception:
                         logger.debug("Engagement check failed")
 
@@ -386,6 +401,17 @@ class VelorumApp(App):
                             )
                     except Exception:
                         logger.exception("Strategy update failed")
+
+                # Periodic submolt re-discovery
+                if (
+                    self.submolts
+                    and self._cycle % self.settings.submolt_discovery_interval_cycles == 0
+                ):
+                    try:
+                        from velorum.main import discover_submolts
+                        await discover_submolts(self.client, self.submolts, self.settings)
+                    except Exception:
+                        logger.debug("Submolt re-discovery failed")
 
             # Transition to waiting
             if self._paused:
@@ -484,6 +510,7 @@ class VelorumApp(App):
 
             mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
             strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
+            submolts_ctx = self.submolts.names_for_prompt() if self.submolts else ""
 
             # Use the dedicated post-generation prompt
             decision = await self.brain.generate_post(
@@ -495,6 +522,7 @@ class VelorumApp(App):
                 feed_topics=feed_topics,
                 mission_context=mission_ctx,
                 strategy_context=strategy_ctx,
+                available_submolts=submolts_ctx,
             )
 
             if decision is None:

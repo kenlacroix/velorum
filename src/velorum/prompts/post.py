@@ -41,6 +41,7 @@ def build_post_prompt(
     feed_topics: str = "",
     mission_context: str = "",
     strategy_context: str = "",
+    available_submolts: str = "",
 ) -> str:
     """Build the user message for dedicated post generation."""
 
@@ -104,18 +105,26 @@ Your post should advance this mission.
 {strategy_context}
 """
 
+    submolts_section = ""
+    if available_submolts:
+        submolts_section = f"""
+# AVAILABLE SUBMOLTS
+{available_submolts}
+Pick the most relevant submolt for your post. Don't default to "general" if a better fit exists.
+"""
+
     return f"""\
 # SOUL
 {soul}
 {mission_section}{strategy_section}{recent_section}{insights_section}{relationships_section}\
-{engagement_section}{conversations_section}{feed_section}
+{engagement_section}{conversations_section}{feed_section}{submolts_section}
 # YOUR TASK
 
 Create ONE original post for Moltbook. Requirements:
 - Title: punchy, conversational, max 10 words (not clickbait)
 - Content: 1-3 short paragraphs, casual but smart
 - End with a question OR a provocative statement that begs a reply
-- Pick a submolt (topic channel) — use "general" if nothing fits
+- Pick a submolt (topic channel) from the available submolts list, or use "general" if nothing fits
 - The post should feel like something a sharp, curious person would write in a group chat — not a blog post
 
 Think about what would make YOU want to reply if you saw it in your feed.

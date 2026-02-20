@@ -36,16 +36,29 @@ def build_decision_prompt(
     conversations_summary: str = "",
     mission_context: str = "",
     strategy_context: str = "",
+    post_comments: dict[str, list] | None = None,
+    available_submolts: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
     feed_lines: list[str] = []
     for post in posts:
-        feed_lines.append(
+        block = (
             f"ID: {post.id}\nAuthor: {post.author}\n"
             f"Title: {post.title}\nContent: {post.content}\n"
             f"Submolt: {post.submolt}\nUpvotes: {post.upvotes} | "
             f"Comments: {post.comment_count}\n"
         )
+        # Append visible comments if we fetched them for this post
+        if post_comments and post.id in post_comments:
+            comment_lines = ["  Comments:"]
+            for c in post_comments[post.id]:
+                parent_label = f"replying to: {c.parent_id}" if c.parent_id else "top-level"
+                snippet = c.content[:120].replace("\n", " ")
+                comment_lines.append(
+                    f'  [{c.id}] @{c.author}: "{snippet}" ({parent_label})'
+                )
+            block += "\n".join(comment_lines) + "\n"
+        feed_lines.append(block)
     feed_dump = "\n".join(feed_lines) if feed_lines else "(empty feed)"
 
     post_section = ""
@@ -70,7 +83,7 @@ Bad posts:
 - Anything you've already posted about recently
 - Posts that nobody would want to reply to
 
-Pick a relevant submolt from the feed or use "general".
+Pick a relevant submolt from the available submolts list, the feed, or use "general" if nothing fits.
 Title should be punchy and conversational (not clickbait).
 Content should be 1-3 short paragraphs max — enough to spark a reply, not write an essay.
 End with a question or provocative statement that invites responses.
@@ -125,10 +138,19 @@ Join Moltbook and contribute intelligently — reply to discussions OR start new
 {strategy_context}
 """
 
+    submolts_section = ""
+    if available_submolts:
+        submolts_section = f"""
+# AVAILABLE SUBMOLTS
+These are the communities on Moltbook you can post to:
+{available_submolts}
+Pick the most relevant submolt for your post topic. Don't default to "general" if a better fit exists.
+"""
+
     return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{insights_section}{conversations_section}
+{mission_section}{strategy_section}{submolts_section}{insights_section}{conversations_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}
@@ -144,7 +166,7 @@ Posts ignored:
 
 # DECISION TASK
 
-## Option A: RESPOND to a post in the feed
+## Option A: RESPOND to a post (or a specific comment) in the feed
 
 1. Evaluate each post for:
    - Relevance to mission
@@ -153,14 +175,22 @@ Posts ignored:
    - Non-redundancy
    - Likelihood the author will reply back (prefer bots who engage)
 
-2. Score each post from 0-10 internally.
+2. Also evaluate individual comments (shown under posts with [comment_id]):
+   - Challenge assertions you disagree with or can add nuance to
+   - Test claims by asking for evidence or examples
+   - Engage bots you want to learn more about
+   - Reply to comments that invite further discussion
 
-3. If responding:
-   - Choose only one post.
+3. Score each post/comment from 0-10 internally.
+
+4. If responding:
+   - Choose only one post (and optionally one comment within it).
    - Provide thoughtful but concise reply (max 120 words).
    - Tone must align with soul.
    - Ask a follow-up question or add a new angle — your goal is to START a conversation, not leave a one-off comment.
    - Prefer posts by bots you haven't talked to yet, or bots who are known to reply.
+   - To reply to a specific comment, set "parent_comment_id" to that comment's ID.
+   - To reply to the post itself (top-level comment), set "parent_comment_id" to null.
 {post_section}
 ## Option C: OBSERVE
 
@@ -171,8 +201,8 @@ If no post merits a reply AND you have nothing worth posting, choose OBSERVE.
 Return ONLY one of these JSON objects:
 
 If RESPOND:
-{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", "post_title": null, "post_content": null, "post_submolt": null}}
+{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null}}
 {post_output}
 If OBSERVE:
-{{"action": "OBSERVE", "post_id": null, "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": null, "post_title": null, "post_content": null, "post_submolt": null}}\
+{{"action": "OBSERVE", "post_id": null, "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": null, "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null}}\
 """

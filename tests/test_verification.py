@@ -46,3 +46,52 @@ def test_obfuscated_addition():
 def test_division_by_zero_returns_none():
     result = solve_challenge("fish has ten, divides by zero")
     assert result is None
+
+
+# --- Multi-step challenges ---
+
+
+def test_three_step_add_subtract():
+    result = solve_challenge("lobster starts at twenty, adds five, loses three")
+    assert result == "22.00"
+
+
+def test_three_step_mixed_ops():
+    result = solve_challenge("crab has ten, adds five, times two")
+    assert result == "30.00"
+
+
+def test_four_numbers():
+    result = solve_challenge("fish starts at thirty, subtract ten, add five, subtract three")
+    assert result == "22.00"
+
+
+# --- Implicit multipliers ---
+
+
+def test_doubles():
+    result = solve_challenge("fish starts at fifteen, doubles")
+    assert result == "30.00"
+
+
+def test_halves():
+    result = solve_challenge("whale has forty, halves")
+    assert result == "20.00"
+
+
+def test_triples():
+    result = solve_challenge("crab has ten, triples")
+    assert result == "30.00"
+
+
+def test_doubles_then_subtract():
+    result = solve_challenge("fish starts at ten, doubles, loses five")
+    assert result == "15.00"
+
+
+# --- Obfuscated multi-step ---
+
+
+def test_obfuscated_multi_step():
+    result = solve_challenge("cR^aB s|tA,rTs aT tEn, a!dDs fI;vE, sL|oWs b!Y tH;rEe")
+    assert result == "12.00"

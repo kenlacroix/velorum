@@ -505,6 +505,32 @@ class MoltbookClient:
         resp.raise_for_status()
         return resp.json()
 
+    # --- Submolts ---
+
+    async def get_submolts(
+        self, sort: str = "popular", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Discover submolts. Returns list of submolt dicts."""
+        resp = await self._request(
+            "GET", "/submolts", params={"sort": sort, "limit": limit}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        submolts = data.get("submolts", data) if isinstance(data, dict) else data
+        return submolts if isinstance(submolts, list) else []
+
+    async def subscribe_submolt(self, name: str) -> dict[str, Any]:
+        """Subscribe to a submolt by name."""
+        resp = await self._request("POST", f"/submolts/{name}/subscribe")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def unsubscribe_submolt(self, name: str) -> dict[str, Any]:
+        """Unsubscribe from a submolt by name."""
+        resp = await self._request("POST", f"/submolts/{name}/unsubscribe")
+        resp.raise_for_status()
+        return resp.json()
+
     # --- Profile ---
 
     async def get_me(self) -> dict[str, Any]:

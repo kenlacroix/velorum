@@ -27,11 +27,37 @@ WORD_NUMBERS: dict[str, float] = {
     "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
 }
 
-# Operation keywords
-ADD_WORDS = {"adds", "add", "plus", "gains", "increases", "grows", "speeds"}
-SUB_WORDS = {"subtracts", "subtract", "minus", "loses", "decreases", "slows", "drops"}
-MUL_WORDS = {"multiplies", "multiply", "times", "doubles", "triples", "product"}
-DIV_WORDS = {"divides", "divide", "halves", "splits"}
+# Per-word operation lookup (maps word → operation name)
+_OP_LOOKUP: dict[str, str] = {}
+for _w in ("adds", "add", "added", "plus", "gains", "gained",
+           "increases", "increased", "grows", "grew", "speeds", "sped"):
+    _OP_LOOKUP[_w] = "add"
+for _w in ("subtracts", "subtract", "subtracted", "minus",
+           "loses", "lost", "decreases", "decreased",
+           "slows", "slowed", "drops", "dropped"):
+    _OP_LOOKUP[_w] = "subtract"
+for _w in ("multiplies", "multiplied", "multiply", "times", "product"):
+    _OP_LOOKUP[_w] = "multiply"
+for _w in ("divides", "divided", "divide", "splits", "split"):
+    _OP_LOOKUP[_w] = "divide"
+
+# Implicit operation + operand (no separate number follows)
+_IMPLICIT_OPS: dict[str, tuple[str, float]] = {
+    "doubles": ("multiply", 2),
+    "doubled": ("multiply", 2),
+    "triples": ("multiply", 3),
+    "tripled": ("multiply", 3),
+    "quadruples": ("multiply", 4),
+    "quadrupled": ("multiply", 4),
+    "halves": ("divide", 2),
+    "halved": ("divide", 2),
+}
+
+# Words to skip during parsing (prepositions, articles, connectors)
+_SKIP_WORDS = frozenset({
+    "a", "an", "the", "at", "by", "to", "of", "and", "then", "with",
+    "its", "it", "is", "was", "has", "had", "more", "from", "for",
+})
 
 
 def deobfuscate(text: str) -> str:
@@ -53,8 +79,9 @@ def _merge_fragments(text: str) -> str:
 
     Obfuscation can split a word like "twenty" into "twen ty" by inserting
     a space (after stripping special chars). Try merging adjacent tokens
-    to reconstruct known number words.
+    to reconstruct known number and operation words.
     """
+    all_known = set(WORD_NUMBERS) | set(_OP_LOOKUP) | set(_IMPLICIT_OPS)
     words = text.split()
     merged: list[str] = []
     i = 0
@@ -64,7 +91,7 @@ def _merge_fragments(text: str) -> str:
         for span in (3, 2):
             if i + span <= len(words):
                 candidate = "".join(words[i : i + span])
-                if candidate in WORD_NUMBERS:
+                if candidate in all_known:
                     merged.append(candidate)
                     i += span
                     found = True
@@ -75,25 +102,56 @@ def _merge_fragments(text: str) -> str:
     return " ".join(merged)
 
 
-def _extract_numbers(text: str) -> list[float]:
-    """Extract all numbers (word or digit form) from cleaned text.
+def _parse_expression(text: str) -> tuple[list[float], list[str]]:
+    """Parse cleaned text into a sequence of numbers and operations.
 
-    Handles compound numbers like "twenty three" (23), "one hundred" (100),
-    "three hundred fifty" (350), etc.
+    Walks through words left-to-right, extracting numbers (digit or word
+    form, including compounds like "twenty three") and operations in the
+    order they appear.
+
+    Returns (numbers, operations) where len(operations) == len(numbers) - 1.
     """
+    words = text.split()
     numbers: list[float] = []
-    # Digit numbers (including decimals)
-    for match in re.finditer(r"\b\d+(?:\.\d+)?\b", text):
-        numbers.append(float(match.group()))
-
-    # Word numbers — handle compound forms (e.g., "twenty three" = 23)
-    words = text.lower().split()
+    operations: list[str] = []
+    pending_op: str | None = None
     i = 0
+
     while i < len(words):
         word = words[i].strip(".,!?;:")
+
+        # Implicit operation with built-in operand (doubles, halves, etc.)
+        if word in _IMPLICIT_OPS:
+            op, implicit_val = _IMPLICIT_OPS[word]
+            if numbers:
+                operations.append(op)
+                numbers.append(implicit_val)
+            i += 1
+            pending_op = None
+            continue
+
+        # Operation word
+        if word in _OP_LOOKUP:
+            pending_op = _OP_LOOKUP[word]
+            i += 1
+            continue
+
+        # Digit number
+        digit_match = re.match(r"\d+(?:\.\d+)?$", word)
+        if digit_match:
+            value = float(digit_match.group())
+            if numbers and pending_op:
+                operations.append(pending_op)
+            elif numbers:
+                operations.append("add")  # fallback
+            numbers.append(value)
+            pending_op = None
+            i += 1
+            continue
+
+        # Word number (with compound look-ahead)
         if word in WORD_NUMBERS:
             value = WORD_NUMBERS[word]
-            # Look ahead to build compound numbers
             j = i + 1
             while j < len(words):
                 next_word = words[j].strip(".,!?;:")
@@ -110,26 +168,19 @@ def _extract_numbers(text: str) -> list[float]:
                     j += 1
                 else:
                     break
+            if numbers and pending_op:
+                operations.append(pending_op)
+            elif numbers:
+                operations.append("add")  # fallback
             numbers.append(value)
+            pending_op = None
             i = j
-        else:
-            i += 1
-    return numbers
+            continue
 
+        # Skip noise words, move on
+        i += 1
 
-def _detect_operation(text: str) -> str:
-    """Detect the math operation from the challenge text."""
-    lower = text.lower()
-    words = set(lower.split())
-    if words & SUB_WORDS or "slows" in lower or "minus" in lower or "drops" in lower:
-        return "subtract"
-    if words & MUL_WORDS or "times" in lower or "multiplied" in lower:
-        return "multiply"
-    if words & DIV_WORDS or "divided" in lower or "halves" in lower:
-        return "divide"
-    if words & ADD_WORDS or "adds" in lower or "plus" in lower:
-        return "add"
-    return "add"  # default fallback
+    return numbers, operations
 
 
 def solve_challenge(challenge: str) -> str | None:
@@ -137,9 +188,9 @@ def solve_challenge(challenge: str) -> str | None:
 
     Steps:
     1. Deobfuscate the challenge text (strip junk chars, normalize)
-    2. Extract numbers (word form or digit form)
-    3. Detect the math operation
-    4. Compute and format to 2 decimal places
+    2. Parse numbers and operations sequentially
+    3. Evaluate left-to-right
+    4. Format to 2 decimal places
 
     Returns the answer formatted to 2 decimal places (e.g., "15.00"),
     or None if the challenge could not be parsed. Callers MUST check
@@ -152,33 +203,55 @@ def solve_challenge(challenge: str) -> str | None:
     cleaned = _merge_fragments(cleaned)
     logger.info("Deobfuscated: %r", cleaned)
 
-    numbers = _extract_numbers(cleaned)
+    numbers, operations = _parse_expression(cleaned)
+    logger.debug("Parsed: numbers=%s, operations=%s", numbers, operations)
+
     if len(numbers) < 2:
         logger.error(
-            "CANNOT SOLVE — not enough numbers in challenge: %r (cleaned: %r)",
+            "CANNOT SOLVE — not enough numbers in challenge: %r (cleaned: %r, found: %s)",
             challenge,
+            cleaned,
+            numbers,
+        )
+        return None
+
+    if len(operations) != len(numbers) - 1:
+        logger.error(
+            "CANNOT SOLVE — mismatched operations: %d numbers, %d ops (cleaned: %r)",
+            len(numbers),
+            len(operations),
             cleaned,
         )
         return None
 
-    a, b = numbers[0], numbers[1]
-    op = _detect_operation(cleaned)
-
-    if op == "divide" and b == 0:
-        logger.error("CANNOT SOLVE — division by zero in challenge: %r", challenge)
-        return None
-
-    if op == "add":
-        result = a + b
-    elif op == "subtract":
-        result = a - b
-    elif op == "multiply":
-        result = a * b
-    elif op == "divide":
-        result = a / b
-    else:
-        result = a + b
+    # Evaluate left-to-right
+    result = numbers[0]
+    for j, op in enumerate(operations):
+        n = numbers[j + 1]
+        if op == "add":
+            result += n
+        elif op == "subtract":
+            result -= n
+        elif op == "multiply":
+            result *= n
+        elif op == "divide":
+            if n == 0:
+                logger.error("CANNOT SOLVE — division by zero in challenge: %r", challenge)
+                return None
+            result /= n
+        else:
+            result += n  # fallback
 
     answer = f"{result:.2f}"
-    logger.info("Solved: %s %s %s = %s", a, op, b, answer)
+    logger.info(
+        "Solved: %s = %s (steps: %s)",
+        " → ".join(
+            f"{numbers[0]}"
+            if k == 0
+            else f"{operations[k-1]} {numbers[k]}"
+            for k in range(len(numbers))
+        ),
+        answer,
+        len(operations),
+    )
     return answer

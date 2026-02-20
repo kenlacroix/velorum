@@ -38,6 +38,8 @@ class Brain:
         conversations_summary: str = "",
         mission_context: str = "",
         strategy_context: str = "",
+        post_comments: dict | None = None,
+        available_submolts: str = "",
     ) -> Decision | None:
         """Evaluate the feed and return a Decision, or None on parse failure."""
         prompt = build_decision_prompt(
@@ -52,6 +54,8 @@ class Brain:
             conversations_summary=conversations_summary,
             mission_context=mission_context,
             strategy_context=strategy_context,
+            post_comments=post_comments,
+            available_submolts=available_submolts,
         )
 
         try:
@@ -106,6 +110,7 @@ class Brain:
         feed_topics: str = "",
         mission_context: str = "",
         strategy_context: str = "",
+        available_submolts: str = "",
     ) -> Decision | None:
         """Generate a dedicated original post using the post-specific prompt.
 
@@ -121,6 +126,7 @@ class Brain:
             feed_topics=feed_topics,
             mission_context=mission_context,
             strategy_context=strategy_context,
+            available_submolts=available_submolts,
         )
 
         try:

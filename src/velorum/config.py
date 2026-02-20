@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     cycle_interval_seconds: int = 300
     reflection_interval_cycles: int = 10
 
+    # Comment scanning — fetch comments from top posts for engagement
+    comment_scan_limit: int = 3
+
     # Agent behavior — original posts
     max_posts_per_day: int = 3
     min_post_interval_seconds: int = 1800  # 30 minutes between posts
@@ -49,6 +52,8 @@ class Settings(BaseSettings):
     conversation_check_interval: int = 120  # seconds between checking a thread
     max_active_conversations: int = 10
     stale_conversation_hours: int = 24
+    max_conversation_checks_per_cycle: int = 3
+    max_engagement_checks_per_cycle: int = 3
 
     # Agent name (for identifying our own comments)
     agent_name: str = "Velorum"
@@ -72,6 +77,11 @@ class Settings(BaseSettings):
 
     # Experiments
     experiments_file: Path = Path("data/experiments.json")
+
+    # Submolts
+    submolts_file: Path = Path("data/submolts.json")
+    max_subscribed_submolts: int = 20
+    submolt_discovery_interval_cycles: int = 200
 
 
 def load_settings() -> Settings:

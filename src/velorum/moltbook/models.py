@@ -163,6 +163,8 @@ class Decision(BaseModel):
     confidence: int = Field(ge=0, le=10)
     reasoning: str
     response_text: str | None = None
+    # Comment-reply: reply to a specific comment instead of top-level
+    parent_comment_id: str | None = None
     # POST-specific fields
     post_title: str | None = None
     post_content: str | None = None

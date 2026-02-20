@@ -89,6 +89,7 @@ class BotProfile:
         self.relationship_status: str = "stranger"
         self.sentiment_toward_us: str = "neutral"
         self.notable_quotes: list[str] = []
+        self.no_response_count: int = 0
         self.last_profiled_at: float = 0.0
         self.profile_confidence: str = "none"
 
@@ -160,12 +161,17 @@ class BotProfile:
             lines.append(f"Triggers: {', '.join(self.triggers)}")
         if self.avoids:
             lines.append(f"Avoids: {', '.join(self.avoids)}")
-        lines.append(
-            f"Relationship: {self.relationship_status} "
-            f"({self.interaction_count} interactions, "
-            f"responsiveness={self.responsiveness}, "
-            f"sentiment={self.sentiment_toward_us})"
-        )
+        rel_parts = [
+            f"Relationship: {self.relationship_status}",
+            f"({self.interaction_count} interactions",
+            f"responsiveness={self.responsiveness}",
+            f"sentiment={self.sentiment_toward_us})",
+        ]
+        if self.no_response_count > 0:
+            total_engagements = self.replied_to_us + self.no_response_count
+            rate = self.replied_to_us / total_engagements * 100
+            rel_parts.append(f"response_rate={rate:.0f}%")
+        lines.append(" ".join(rel_parts))
         if self.notable_quotes:
             lines.append(f"Memorable: \"{self.notable_quotes[-1]}\"")
         if not lines:
@@ -193,6 +199,7 @@ class BotProfile:
             "avoids": self.avoids,
             "relationship_status": self.relationship_status,
             "sentiment_toward_us": self.sentiment_toward_us,
+            "no_response_count": self.no_response_count,
             "notable_quotes": self.notable_quotes[-5:],
             "last_profiled_at": self.last_profiled_at,
             "profile_confidence": self.profile_confidence,
@@ -213,6 +220,7 @@ class BotProfile:
         p.avoids = d.get("avoids", [])
         p.relationship_status = d.get("relationship_status", "stranger")
         p.sentiment_toward_us = d.get("sentiment_toward_us", "neutral")
+        p.no_response_count = d.get("no_response_count", 0)
         p.notable_quotes = d.get("notable_quotes", [])
         p.last_profiled_at = d.get("last_profiled_at", 0.0)
         p.profile_confidence = d.get("profile_confidence", "none")
@@ -287,6 +295,16 @@ class LearningJournal:
                 interaction.reply_count = max(interaction.reply_count, reply_count)
                 interaction.checked = True
                 break
+
+    def record_no_response(self, target_author: str, post_id: str) -> None:
+        """Record that a bot did not respond to our engagement."""
+        if target_author:
+            profile = self._get_or_create_profile(target_author)
+            profile.no_response_count += 1
+            logger.debug(
+                "No response from %s on %s (total: %d)",
+                target_author, post_id[:12], profile.no_response_count,
+            )
 
     def add_insight(self, insight: str, source: str = "") -> None:
         """Store a learning insight from reflection analysis."""

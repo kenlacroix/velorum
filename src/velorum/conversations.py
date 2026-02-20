@@ -214,13 +214,25 @@ class ConversationTracker:
     def conversations_needing_check(
         self,
         check_interval: float = 120.0,
+        limit: int = 0,
     ) -> list[Conversation]:
-        """Get active conversations due for a reply check."""
+        """Get active conversations due for a reply check.
+
+        Results are sorted by last_checked_at ascending (oldest first)
+        so that conversations rotate round-robin across cycles.
+
+        Args:
+            check_interval: Minimum seconds since last check.
+            limit: Maximum conversations to return (0 = unlimited).
+        """
         now = time.time()
         due: list[Conversation] = []
         for conv in self.active_conversations:
             if now - conv.last_checked_at >= check_interval:
                 due.append(conv)
+        due.sort(key=lambda c: c.last_checked_at)
+        if limit > 0:
+            due = due[:limit]
         return due
 
     def summary_text(self) -> str:

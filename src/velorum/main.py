@@ -28,16 +28,17 @@ from velorum.llm.base import LLMProvider
 from velorum.memory import Memory
 from velorum.mission import MissionManager
 from velorum.moltbook.client import MoltbookClient
-from velorum.moltbook.models import Decision
+from velorum.moltbook.models import Comment, Decision
 from velorum.moltbook.verification import solve_challenge
 from velorum.strategy import StrategyEngine
+from velorum.submolts import SubmoltManager
 
 logger = logging.getLogger(__name__)
 
 
 def init_components(
     settings: Settings,
-) -> tuple[MoltbookClient, Brain, Controller, Memory, MissionManager, StrategyEngine, ExperimentLog]:
+) -> tuple[MoltbookClient, Brain, Controller, Memory, MissionManager, StrategyEngine, ExperimentLog, SubmoltManager]:
     """Initialize all bot components from settings."""
     if not settings.moltbook_api_key:
         logger.error("MOLTBOOK_API_KEY is required. Set it in .env")
@@ -74,8 +75,58 @@ def init_components(
     missions = MissionManager(persist_path=settings.mission_file)
     strategy = StrategyEngine(persist_path=settings.strategy_file)
     experiments = ExperimentLog(persist_path=settings.experiments_file)
+    submolts = SubmoltManager(persist_path=settings.submolts_file)
 
-    return client, brain, controller, memory, missions, strategy, experiments
+    return client, brain, controller, memory, missions, strategy, experiments, submolts
+
+
+# ---------------------------------------------------------------------------
+# Submolt discovery + subscription
+# ---------------------------------------------------------------------------
+
+
+async def discover_submolts(
+    client: MoltbookClient,
+    submolts: SubmoltManager,
+    settings: Settings,
+) -> None:
+    """Discover popular submolts and subscribe to top ones."""
+    if client.is_banned:
+        return
+
+    try:
+        raw = await client.get_submolts(sort="popular", limit=50)
+        if not raw:
+            logger.info("No submolts returned from API")
+            return
+
+        submolts.update_discovered(raw)
+        logger.info("Discovered %d submolts", len(raw))
+
+        # Subscribe to top N we aren't already in
+        subscribed_count = 0
+        for s in raw:
+            name = s.get("name", "")
+            if not name:
+                continue
+            if name in submolts.subscribed:
+                continue
+            if len(submolts.subscribed) >= settings.max_subscribed_submolts:
+                break
+            try:
+                await client.subscribe_submolt(name)
+                submolts.record_subscription(name)
+                subscribed_count += 1
+                logger.info("Subscribed to submolt: %s", name)
+            except Exception:
+                logger.debug("Could not subscribe to %s", name)
+
+        if subscribed_count:
+            logger.info("Subscribed to %d new submolt(s)", subscribed_count)
+
+        submolts.save()
+    except Exception:
+        logger.exception("Submolt discovery failed")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +159,7 @@ async def check_conversations(
     # Get conversations due for a check
     due = tracker.conversations_needing_check(
         check_interval=settings.conversation_check_interval,
+        limit=settings.max_conversation_checks_per_cycle,
     )
 
     if not due:
@@ -280,6 +332,51 @@ async def check_conversations(
 
 
 # ---------------------------------------------------------------------------
+# Comment scanning — fetch notable comments from top posts
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_notable_comments(
+    client: MoltbookClient,
+    posts: list,
+    memory: Memory,
+    max_posts: int = 3,
+) -> dict[str, list[Comment]]:
+    """Fetch comments from the most-discussed posts for the decision prompt.
+
+    Filters out our own posts, posts we're already tracking, and posts
+    with fewer than 2 comments. Returns up to 5 comments per post.
+    """
+    our_name = memory.conversations._our_name.lower()
+    tracked_ids = {c.post_id for c in memory.conversations._conversations}
+
+    candidates = [
+        p for p in posts
+        if p.comment_count >= 2
+        and p.id not in tracked_ids
+        and p.author.lower() != our_name
+        and _is_uuid(p.id)
+    ]
+    candidates.sort(key=lambda p: p.comment_count, reverse=True)
+
+    result: dict[str, list[Comment]] = {}
+    for post in candidates[:max_posts]:
+        try:
+            comments = await client.get_comments(post.id)
+            # Filter out our own comments, keep up to 5
+            others = [
+                c for c in comments
+                if c.author.lower() != our_name
+            ][:5]
+            if others:
+                result[post.id] = others
+        except Exception:
+            logger.debug("Could not fetch comments for %s", post.id[:12])
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: Main decision cycle (feed → decide → act)
 # ---------------------------------------------------------------------------
 
@@ -293,10 +390,12 @@ async def run_cycle(
     missions: MissionManager | None = None,
     strategy: StrategyEngine | None = None,
     experiments: ExperimentLog | None = None,
+    submolts: SubmoltManager | None = None,
 ) -> None:
     """Execute one full cycle: check conversations, then feed decision."""
     mission_context = missions.mission_context_for_prompt() if missions else ""
     strategy_context = strategy.summary_for_prompt() if strategy else ""
+    available_submolts = submolts.names_for_prompt() if submolts else ""
 
     # Phase 1: Check active conversations for replies
     if settings:
@@ -328,6 +427,23 @@ async def run_cycle(
         logger.info("Empty feed, skipping cycle")
         return
 
+    # Fetch comments from notable posts for comment engagement
+    scan_limit = settings.comment_scan_limit if settings else 3
+    post_comments: dict[str, list[Comment]] = {}
+    if scan_limit > 0:
+        try:
+            post_comments = await _fetch_notable_comments(
+                client, posts, memory, max_posts=scan_limit,
+            )
+            if post_comments:
+                total = sum(len(v) for v in post_comments.values())
+                logger.info(
+                    "Scanned comments: %d comments across %d posts",
+                    total, len(post_comments),
+                )
+        except Exception:
+            logger.debug("Comment scanning failed")
+
     can_post = controller.can_post()
     decision = await brain.decide(
         posts,
@@ -336,6 +452,8 @@ async def run_cycle(
         conversations_summary=memory.conversations.summary_text(),
         mission_context=mission_context,
         strategy_context=strategy_context,
+        post_comments=post_comments or None,
+        available_submolts=available_submolts,
     )
     if decision is None:
         logger.warning("Brain returned no decision (parse failure), skipping cycle")
@@ -351,9 +469,38 @@ async def run_cycle(
             experiments.record_cycle("OBSERVE")
         return
 
+    # Validate parent_comment_id if present
+    parent_comment_id = decision.parent_comment_id
+    target_comment_author = ""
+    if parent_comment_id:
+        if not _is_uuid(parent_comment_id):
+            logger.warning("Hallucinated parent_comment_id: %s — falling back to top-level", parent_comment_id)
+            parent_comment_id = None
+        elif post_comments:
+            # Verify the comment actually exists in our fetched data
+            found = False
+            for comments in post_comments.values():
+                for c in comments:
+                    if c.id == parent_comment_id:
+                        target_comment_author = c.author
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                logger.warning("parent_comment_id %s not in fetched comments — falling back to top-level", parent_comment_id[:12])
+                parent_comment_id = None
+        else:
+            # No comments were fetched, can't validate
+            parent_comment_id = None
+
     success = False
     if decision.action == "RESPOND":
-        success = await _handle_respond(client, controller, memory, decision, posts)
+        success = await _handle_respond(
+            client, controller, memory, decision, posts,
+            parent_comment_id=parent_comment_id,
+            target_comment_author=target_comment_author,
+        )
     elif decision.action == "POST":
         success = await _handle_post(client, controller, memory, decision, settings)
 
@@ -392,6 +539,8 @@ async def _handle_respond(
     memory: Memory,
     decision: "Decision",
     posts: list,
+    parent_comment_id: str | None = None,
+    target_comment_author: str = "",
 ) -> bool:
     """Post a comment and start tracking the conversation.
 
@@ -411,6 +560,7 @@ async def _handle_respond(
         result = await client.create_comment(
             post_id=decision.post_id,
             content=decision.response_text,
+            parent_id=parent_comment_id,
         )
 
         if result.needs_verification:
@@ -465,21 +615,30 @@ async def _handle_respond(
             parent_id=decision.post_id,
         ))
 
-        # Record in learning
-        target_author = post_obj.author if post_obj else ""
+        # Record in learning — use ENGAGE when replying to a specific comment
+        action_type = "ENGAGE" if parent_comment_id else "RESPOND"
+        target_author = target_comment_author or (post_obj.author if post_obj else "")
         memory.learning.record_interaction(
             post_id=decision.post_id,
-            action="RESPOND",
+            action=action_type,
             our_text=decision.response_text,
             target_author=target_author,
             topic_hint=post_obj.title[:40] if post_obj else "",
         )
 
-        logger.info(
-            "Posted comment on %s (confidence: %d)",
-            decision.post_id,
-            decision.confidence,
-        )
+        if parent_comment_id:
+            logger.info(
+                "Replied to comment by %s on %s (confidence: %d)",
+                target_comment_author,
+                decision.post_id[:12],
+                decision.confidence,
+            )
+        else:
+            logger.info(
+                "Posted comment on %s (confidence: %d)",
+                decision.post_id,
+                decision.confidence,
+            )
         return True
     except httpx.HTTPStatusError as e:
         logger.error(
@@ -614,6 +773,7 @@ async def _handle_post(
 async def check_engagement(
     client: MoltbookClient,
     memory: Memory,
+    max_checks: int = 5,
 ) -> None:
     """Check engagement on our recent interactions (upvotes, reply counts)."""
     if client.is_banned:
@@ -624,8 +784,9 @@ async def check_engagement(
         return
 
     logger.info("Checking engagement on %d recent interaction(s)", len(unchecked))
+    now = __import__("time").time()
 
-    for interaction in unchecked[:5]:  # check up to 5 per cycle
+    for interaction in unchecked[:max_checks]:
         if not _is_uuid(interaction.post_id):
             interaction.checked = True  # mark so we don't retry
             continue
@@ -640,6 +801,19 @@ async def check_engagement(
                 post_id=interaction.post_id,
                 reply_count=reply_count,
             )
+
+            # Track non-responses for ENGAGE interactions older than 30 min
+            if (
+                interaction.action == "ENGAGE"
+                and interaction.reply_count == 0
+                and reply_count == 0
+                and (now - interaction.timestamp) > 1800
+                and interaction.target_author
+            ):
+                memory.learning.record_no_response(
+                    target_author=interaction.target_author,
+                    post_id=interaction.post_id,
+                )
         except Exception:
             logger.debug("Could not check engagement for %s", interaction.post_id)
 
@@ -667,15 +841,26 @@ async def profile_bots(
     logger.info("Profiling %d bot(s)", min(2, len(needs_profiling)))
 
     for profile in needs_profiling[:2]:  # profile up to 2 per cycle
+        bot_name_lower = profile.name.lower()
+
         # Build interaction history from our interactions with this bot
         history_lines = []
         for interaction in memory.learning._interactions:
-            if interaction.target_author.lower() == profile.name.lower():
+            if interaction.target_author.lower() == bot_name_lower:
                 history_lines.append(
                     f"[{interaction.action}] We said: \"{interaction.our_text[:80]}\" "
                     f"(topic: {interaction.topic_hint}, replies: {interaction.reply_count})"
                 )
         interaction_history = "\n".join(history_lines[-15:]) or "No direct interactions recorded."
+
+        # Collect their actual words from tracked conversations
+        their_words: list[str] = []
+        for conv in memory.conversations._conversations.values():
+            for msg in conv.messages:
+                if msg.author.lower() == bot_name_lower:
+                    context = f"(in: {conv.post_title[:30]})" if conv.post_title else ""
+                    their_words.append(f'- "{msg.content[:150]}" {context}')
+        their_posts = "\n".join(their_words[-20:])
 
         # Build existing profile summary
         existing = ""
@@ -689,6 +874,7 @@ async def profile_bots(
         result = await brain.profile_bot(
             bot_name=profile.name,
             interaction_history=interaction_history,
+            their_posts=their_posts,
             existing_profile=existing,
         )
 
@@ -813,7 +999,7 @@ async def main() -> None:
     )
 
     settings = load_settings()
-    client, brain, controller, memory, missions, strategy, experiments = init_components(settings)
+    client, brain, controller, memory, missions, strategy, experiments, submolts = init_components(settings)
 
     logger.info("Velorum starting — provider=%s, model=%s", settings.llm_provider, settings.llm_model)
 
@@ -830,6 +1016,13 @@ async def main() -> None:
     # Refresh stale data from server
     if not client.is_banned:
         await refresh_data(client, memory)
+
+    # Discover and subscribe to submolts
+    if not client.is_banned and submolts.needs_discovery(
+        settings.submolt_discovery_interval_cycles,
+        settings.cycle_interval_seconds,
+    ):
+        await discover_submolts(client, submolts, settings)
 
     # Plan mission if one is set but not yet planned
     if missions.active_mission and missions.active_mission.status == "planning":
@@ -867,11 +1060,11 @@ async def main() -> None:
             cycle += 1
             logger.info("=== Cycle %d ===", cycle)
 
-            await run_cycle(client, brain, controller, memory, settings, missions, strategy, experiments)
+            await run_cycle(client, brain, controller, memory, settings, missions, strategy, experiments, submolts)
 
             # Engagement check every 3rd cycle
             if cycle % settings.engagement_check_interval_cycles == 0:
-                await check_engagement(client, memory)
+                await check_engagement(client, memory, max_checks=settings.max_engagement_checks_per_cycle)
 
             # Bot profiling
             if cycle % settings.profiling_interval_cycles == 0:
@@ -931,6 +1124,10 @@ async def main() -> None:
                     strategy.apply_update(result)
                     logger.info("Strategy updated: %s", result.get("assessment", "")[:100])
 
+            # Periodic submolt re-discovery
+            if cycle % settings.submolt_discovery_interval_cycles == 0:
+                await discover_submolts(client, submolts, settings)
+
             await asyncio.sleep(settings.cycle_interval_seconds)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
@@ -950,7 +1147,7 @@ def entry() -> None:
 
         logging.getLogger().setLevel(logging.INFO)
         settings = load_settings()
-        client, brain, controller, memory, missions, strategy, experiments = init_components(settings)
+        client, brain, controller, memory, missions, strategy, experiments, submolts = init_components(settings)
 
         app = VelorumApp(
             settings=settings,
@@ -961,6 +1158,7 @@ def entry() -> None:
             missions=missions,
             strategy=strategy,
             experiments=experiments,
+            submolts=submolts,
         )
         app.run()
 
