@@ -39,6 +39,7 @@ class StatsPanel(Container):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="stat-status")
+        yield Static("", id="stat-ban")
         yield Static("", id="stat-uptime")
         yield Static("", id="stat-cycle")
         yield Static("", id="stat-countdown")
@@ -80,6 +81,7 @@ class StatsPanel(Container):
         color = {
             "Online": "bold green",
             "Paused": "bold yellow",
+            "Banned": "bold red",
             "Fetching feed": "bold cyan",
             "Brain deciding": "bold magenta",
             "Posting comment": "bold blue",
@@ -93,6 +95,7 @@ class StatsPanel(Container):
         marker = {
             "Online": "[green]\u25cf[/]",
             "Paused": "[yellow]\u25cf[/]",
+            "Banned": "[red]\u26d4[/]",
             "Fetching feed": "[cyan]\u21bb[/]",
             "Brain deciding": "[magenta]\u2699[/]",
             "Posting comment": "[blue]\u2191[/]",
@@ -105,6 +108,18 @@ class StatsPanel(Container):
         }.get(status, "\u25cf")
         self.query_one("#stat-status", Static).update(
             f"  {marker} [{color}]{status}[/]"
+        )
+        # Clear ban display when not banned
+        if status != "Banned":
+            self.query_one("#stat-ban", Static).update("")
+
+    def set_ban_remaining(self, seconds: float) -> None:
+        """Update the ban countdown display."""
+        if seconds <= 0:
+            self.query_one("#stat-ban", Static).update("")
+            return
+        self.query_one("#stat-ban", Static).update(
+            f"  [bold red]Ban expires in: {_fmt_duration(seconds)}[/]"
         )
 
     def set_last_action(self, action: str) -> None:

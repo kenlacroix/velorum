@@ -80,6 +80,17 @@ class BotProfile:
         self.replied_to_us: int = 0
         self.we_replied_to_them: int = 0
         self.last_seen: float = 0.0
+        # Rich profiling fields (filled by LLM analysis)
+        self.personality_summary: str = ""
+        self.interests: list[str] = []
+        self.communication_style: str = ""
+        self.triggers: list[str] = []
+        self.avoids: list[str] = []
+        self.relationship_status: str = "stranger"
+        self.sentiment_toward_us: str = "neutral"
+        self.notable_quotes: list[str] = []
+        self.last_profiled_at: float = 0.0
+        self.profile_confidence: str = "none"
 
     def record_interaction(
         self,
@@ -109,6 +120,64 @@ class BotProfile:
             return "medium"
         return "low"
 
+    def needs_profiling(self) -> bool:
+        """True if 3+ interactions and not profiled in the last 24 hours."""
+        if self.interaction_count < 3:
+            return False
+        if self.last_profiled_at == 0.0:
+            return True
+        return (time.time() - self.last_profiled_at) > 86400
+
+    def apply_profiling(self, data: dict[str, Any]) -> None:
+        """Apply LLM profiling results to this profile."""
+        if data.get("personality_summary"):
+            self.personality_summary = data["personality_summary"]
+        if data.get("interests"):
+            self.interests = data["interests"][:10]
+        if data.get("communication_style"):
+            self.communication_style = data["communication_style"]
+        if data.get("triggers"):
+            self.triggers = data["triggers"][:5]
+        if data.get("avoids"):
+            self.avoids = data["avoids"][:5]
+        if data.get("relationship_status"):
+            self.relationship_status = data["relationship_status"]
+        if data.get("sentiment_toward_us"):
+            self.sentiment_toward_us = data["sentiment_toward_us"]
+        self.last_profiled_at = time.time()
+        self.profile_confidence = "high" if self.interaction_count >= 10 else "medium"
+
+    def rich_summary(self) -> str:
+        """Rich profile summary for injection into prompts."""
+        lines = []
+        if self.personality_summary:
+            lines.append(f"Personality: {self.personality_summary}")
+        if self.interests:
+            lines.append(f"Interests: {', '.join(self.interests)}")
+        if self.communication_style:
+            lines.append(f"Style: {self.communication_style}")
+        if self.triggers:
+            lines.append(f"Triggers: {', '.join(self.triggers)}")
+        if self.avoids:
+            lines.append(f"Avoids: {', '.join(self.avoids)}")
+        lines.append(
+            f"Relationship: {self.relationship_status} "
+            f"({self.interaction_count} interactions, "
+            f"responsiveness={self.responsiveness}, "
+            f"sentiment={self.sentiment_toward_us})"
+        )
+        if self.notable_quotes:
+            lines.append(f"Memorable: \"{self.notable_quotes[-1]}\"")
+        if not lines:
+            # Fall back to basic summary
+            topics = ", ".join(self.topics[-3:]) if self.topics else "general"
+            return (
+                f"Interactions: {self.interaction_count}, "
+                f"Responsiveness: {self.responsiveness}, "
+                f"Topics: [{topics}]"
+            )
+        return "\n".join(lines)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -117,6 +186,16 @@ class BotProfile:
             "replied_to_us": self.replied_to_us,
             "we_replied_to_them": self.we_replied_to_them,
             "last_seen": self.last_seen,
+            "personality_summary": self.personality_summary,
+            "interests": self.interests,
+            "communication_style": self.communication_style,
+            "triggers": self.triggers,
+            "avoids": self.avoids,
+            "relationship_status": self.relationship_status,
+            "sentiment_toward_us": self.sentiment_toward_us,
+            "notable_quotes": self.notable_quotes[-5:],
+            "last_profiled_at": self.last_profiled_at,
+            "profile_confidence": self.profile_confidence,
         }
 
     @classmethod
@@ -127,6 +206,16 @@ class BotProfile:
         p.replied_to_us = d.get("replied_to_us", 0)
         p.we_replied_to_them = d.get("we_replied_to_them", 0)
         p.last_seen = d.get("last_seen", 0.0)
+        p.personality_summary = d.get("personality_summary", "")
+        p.interests = d.get("interests", [])
+        p.communication_style = d.get("communication_style", "")
+        p.triggers = d.get("triggers", [])
+        p.avoids = d.get("avoids", [])
+        p.relationship_status = d.get("relationship_status", "stranger")
+        p.sentiment_toward_us = d.get("sentiment_toward_us", "neutral")
+        p.notable_quotes = d.get("notable_quotes", [])
+        p.last_profiled_at = d.get("last_profiled_at", 0.0)
+        p.profile_confidence = d.get("profile_confidence", "none")
         return p
 
 
@@ -290,6 +379,13 @@ class LearningJournal:
         if not recent:
             return "No insights yet."
         return "\n".join(f"- {i['insight']}" for i in recent)
+
+    def bots_needing_profiling(self) -> list[BotProfile]:
+        """Get bot profiles that should be analyzed by the LLM."""
+        return [
+            p for p in self._bot_profiles.values()
+            if p.needs_profiling()
+        ]
 
     def stats(self) -> dict[str, int]:
         return {

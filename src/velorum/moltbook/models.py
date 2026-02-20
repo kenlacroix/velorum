@@ -26,10 +26,17 @@ class Post(BaseModel):
             return v.get("name", "")
         return v  # type: ignore[return-value]
 
+    @field_validator("title", "content", "submolt", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v: object) -> str:
+        if v is None:
+            return ""
+        return v  # type: ignore[return-value]
+
 
 class Comment(BaseModel):
     id: str
-    post_id: str
+    post_id: str = ""
     author: str = ""
     content: str = ""
     parent_id: str | None = None
@@ -40,6 +47,13 @@ class Comment(BaseModel):
     def _flatten_author(cls, v: object) -> str:
         if isinstance(v, dict):
             return v.get("name", "")
+        return v  # type: ignore[return-value]
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v: object) -> str:
+        if v is None:
+            return ""
         return v  # type: ignore[return-value]
 
 

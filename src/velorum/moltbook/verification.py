@@ -30,7 +30,7 @@ WORD_NUMBERS: dict[str, float] = {
 # Operation keywords
 ADD_WORDS = {"adds", "add", "plus", "gains", "increases", "grows", "speeds"}
 SUB_WORDS = {"subtracts", "subtract", "minus", "loses", "decreases", "slows", "drops"}
-MUL_WORDS = {"multiplies", "multiply", "times", "doubles", "triples"}
+MUL_WORDS = {"multiplies", "multiply", "times", "doubles", "triples", "product"}
 DIV_WORDS = {"divides", "divide", "halves", "splits"}
 
 
@@ -48,17 +48,72 @@ def deobfuscate(text: str) -> str:
     return cleaned.lower()
 
 
+def _merge_fragments(text: str) -> str:
+    """Rejoin word fragments split by obfuscation.
+
+    Obfuscation can split a word like "twenty" into "twen ty" by inserting
+    a space (after stripping special chars). Try merging adjacent tokens
+    to reconstruct known number words.
+    """
+    words = text.split()
+    merged: list[str] = []
+    i = 0
+    while i < len(words):
+        # Try merging 3, then 2 adjacent tokens
+        found = False
+        for span in (3, 2):
+            if i + span <= len(words):
+                candidate = "".join(words[i : i + span])
+                if candidate in WORD_NUMBERS:
+                    merged.append(candidate)
+                    i += span
+                    found = True
+                    break
+        if not found:
+            merged.append(words[i])
+            i += 1
+    return " ".join(merged)
+
+
 def _extract_numbers(text: str) -> list[float]:
-    """Extract all numbers (word or digit form) from cleaned text."""
+    """Extract all numbers (word or digit form) from cleaned text.
+
+    Handles compound numbers like "twenty three" (23), "one hundred" (100),
+    "three hundred fifty" (350), etc.
+    """
     numbers: list[float] = []
     # Digit numbers (including decimals)
     for match in re.finditer(r"\b\d+(?:\.\d+)?\b", text):
         numbers.append(float(match.group()))
-    # Word numbers — check each word
-    for word in text.lower().split():
-        word = word.strip(".,!?;:")
+
+    # Word numbers — handle compound forms (e.g., "twenty three" = 23)
+    words = text.lower().split()
+    i = 0
+    while i < len(words):
+        word = words[i].strip(".,!?;:")
         if word in WORD_NUMBERS:
-            numbers.append(WORD_NUMBERS[word])
+            value = WORD_NUMBERS[word]
+            # Look ahead to build compound numbers
+            j = i + 1
+            while j < len(words):
+                next_word = words[j].strip(".,!?;:")
+                if next_word in WORD_NUMBERS:
+                    next_val = WORD_NUMBERS[next_word]
+                    if next_val == 100 or next_val == 1000:
+                        # "three hundred" = 300
+                        value *= next_val
+                    elif next_val < value and value >= 20:
+                        # "twenty three" = 23
+                        value += next_val
+                    else:
+                        break
+                    j += 1
+                else:
+                    break
+            numbers.append(value)
+            i = j
+        else:
+            i += 1
     return numbers
 
 
@@ -94,6 +149,7 @@ def solve_challenge(challenge: str) -> str | None:
     logger.info("Raw challenge: %r", challenge)
 
     cleaned = deobfuscate(challenge)
+    cleaned = _merge_fragments(cleaned)
     logger.info("Deobfuscated: %r", cleaned)
 
     numbers = _extract_numbers(cleaned)

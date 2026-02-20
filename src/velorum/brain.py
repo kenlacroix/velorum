@@ -9,9 +9,17 @@ from velorum.llm.base import LLMProvider
 from velorum.memory import Memory
 from velorum.moltbook.models import Decision, Post, Reflection, ReplyDecision
 from velorum.prompts.decision import DECISION_SYSTEM, build_decision_prompt
+from velorum.prompts.mission import (
+    MISSION_PLAN_SYSTEM,
+    MISSION_REVIEW_SYSTEM,
+    build_mission_plan_prompt,
+    build_mission_review_prompt,
+)
 from velorum.prompts.post import POST_SYSTEM, build_post_prompt
+from velorum.prompts.profiling import PROFILING_SYSTEM, build_profiling_prompt
 from velorum.prompts.reflection import REFLECTION_SYSTEM, build_reflection_prompt
 from velorum.prompts.reply import REPLY_SYSTEM, build_reply_prompt
+from velorum.prompts.strategy import STRATEGY_SYSTEM, build_strategy_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +36,8 @@ class Brain:
         can_post: bool = True,
         learning_insights: str = "",
         conversations_summary: str = "",
+        mission_context: str = "",
+        strategy_context: str = "",
     ) -> Decision | None:
         """Evaluate the feed and return a Decision, or None on parse failure."""
         prompt = build_decision_prompt(
@@ -40,6 +50,8 @@ class Brain:
             can_post=can_post,
             learning_insights=learning_insights,
             conversations_summary=conversations_summary,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
         )
 
         try:
@@ -59,6 +71,8 @@ class Brain:
         reply_content: str,
         bot_profile_summary: str = "",
         learning_insights: str = "",
+        mission_context: str = "",
+        strategy_context: str = "",
     ) -> ReplyDecision | None:
         """Decide whether to continue a conversation thread."""
         prompt = build_reply_prompt(
@@ -68,6 +82,8 @@ class Brain:
             reply_content=reply_content,
             bot_profile_summary=bot_profile_summary,
             learning_insights=learning_insights,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
         )
 
         try:
@@ -88,6 +104,8 @@ class Brain:
         engagement_summary: str = "",
         conversations_summary: str = "",
         feed_topics: str = "",
+        mission_context: str = "",
+        strategy_context: str = "",
     ) -> Decision | None:
         """Generate a dedicated original post using the post-specific prompt.
 
@@ -101,6 +119,8 @@ class Brain:
             engagement_summary=engagement_summary,
             conversations_summary=conversations_summary,
             feed_topics=feed_topics,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
         )
 
         try:
@@ -129,6 +149,8 @@ class Brain:
         engagement_summary: str = "",
         bot_relationships: str = "",
         conversations_summary: str = "",
+        mission_context: str = "",
+        strategy_context: str = "",
     ) -> Reflection | None:
         """Run a reflection cycle and return a Reflection, or None on failure."""
         prompt = build_reflection_prompt(
@@ -138,6 +160,8 @@ class Brain:
             engagement_summary=engagement_summary,
             bot_relationships=bot_relationships,
             conversations_summary=conversations_summary,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
         )
 
         try:
@@ -148,4 +172,110 @@ class Brain:
             return reflection
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("Failed to parse reflection response: %s", e)
+            return None
+
+    # --- Mission methods ---
+
+    async def plan_mission(
+        self,
+        mission_prompt: str,
+        bot_relationships: str = "",
+        engagement_summary: str = "",
+    ) -> dict | None:
+        """Single LLM call to decompose a mission into steps."""
+        prompt = build_mission_plan_prompt(
+            soul=self._soul,
+            mission_prompt=mission_prompt,
+            bot_relationships=bot_relationships,
+            engagement_summary=engagement_summary,
+        )
+
+        try:
+            raw = await self._llm.complete(system=MISSION_PLAN_SYSTEM, user=prompt)
+            logger.debug("LLM mission plan raw: %s", raw[:500])
+            data = json.loads(raw)
+            return data
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse mission plan response: %s", e)
+            return None
+
+    async def review_mission(
+        self,
+        mission: dict,
+        recent_actions: str = "",
+        engagement_summary: str = "",
+        bot_relationships: str = "",
+    ) -> dict | None:
+        """Single LLM call to assess mission progress."""
+        prompt = build_mission_review_prompt(
+            soul=self._soul,
+            mission=mission,
+            recent_actions=recent_actions,
+            engagement_summary=engagement_summary,
+            bot_relationships=bot_relationships,
+        )
+
+        try:
+            raw = await self._llm.complete(system=MISSION_REVIEW_SYSTEM, user=prompt)
+            logger.debug("LLM mission review raw: %s", raw[:500])
+            data = json.loads(raw)
+            return data
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse mission review response: %s", e)
+            return None
+
+    # --- Bot profiling ---
+
+    async def profile_bot(
+        self,
+        bot_name: str,
+        interaction_history: str = "",
+        their_posts: str = "",
+        existing_profile: str = "",
+    ) -> dict | None:
+        """Single LLM call to analyze a bot's behavior."""
+        prompt = build_profiling_prompt(
+            soul=self._soul,
+            bot_name=bot_name,
+            interaction_history=interaction_history,
+            their_posts=their_posts,
+            existing_profile=existing_profile,
+        )
+
+        try:
+            raw = await self._llm.complete(system=PROFILING_SYSTEM, user=prompt)
+            logger.debug("LLM profiling raw: %s", raw[:500])
+            data = json.loads(raw)
+            return data
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse profiling response: %s", e)
+            return None
+
+    # --- Strategy ---
+
+    async def update_strategy(
+        self,
+        current_strategy: str = "",
+        engagement_data: str = "",
+        bot_profiles: str = "",
+        insights: str = "",
+        mission_context: str = "",
+    ) -> dict | None:
+        """Single LLM call to recommend behavioral parameter changes."""
+        prompt = build_strategy_prompt(
+            soul=self._soul,
+            current_strategy=current_strategy,
+            engagement_data=engagement_data,
+            bot_profiles=bot_profiles,
+            insights=insights,
+            mission_context=mission_context,
+        )
+
+        try:
+            raw = await self._llm.complete(system=STRATEGY_SYSTEM, user=prompt)
+            logger.debug("LLM strategy raw: %s", raw[:500])
+            data = json.loads(raw)
+            return data
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse strategy response: %s", e)
             return None

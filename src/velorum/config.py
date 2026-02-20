@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # Agent behavior — original posts
     max_posts_per_day: int = 3
-    min_post_interval_seconds: int = 7200  # 2 hours (new agent restriction)
+    min_post_interval_seconds: int = 1800  # 30 minutes between posts
     posting_enabled: bool = True
 
     # Conversations — reply threading
@@ -58,6 +58,20 @@ class Settings(BaseSettings):
 
     # Soul file
     soul_file: Path = Path("docs/SOUL.md")
+
+    # Mission system
+    mission_file: Path = Path("data/mission.json")
+    mission_review_interval_cycles: int = 5
+
+    # Strategy system
+    strategy_file: Path = Path("data/strategy.json")
+    strategy_update_interval_cycles: int = 50
+
+    # Bot profiling
+    profiling_interval_cycles: int = 10
+
+    # Experiments
+    experiments_file: Path = Path("data/experiments.json")
 
 
 def load_settings() -> Settings:

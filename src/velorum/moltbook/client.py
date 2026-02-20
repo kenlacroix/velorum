@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,12 +25,17 @@ class MoltbookClient:
         api_key: str,
         app_key: str = "",
         timeout: int = 30,
+        ban_file: Path | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._app_key = app_key
         self._identity_token: str | None = None
         self._verified: bool = False
+        self._ban_until: datetime | None = None
+        self._ban_reason: str = ""
+        self._ban_file = ban_file or Path("data/ban.json")
+        self._load_ban()
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -59,6 +67,184 @@ class MoltbookClient:
             self._identity_token = token
             logger.debug("Identity token updated from response header")
 
+    # --- Ban tracking ---
+
+    def _check_for_ban(self, data: dict[str, Any]) -> None:
+        """Parse ban information from an API response body.
+
+        Looks for ban indicators in various response shapes:
+        - {"banned_until": "ISO timestamp", "reason": "..."}
+        - {"agent": {"banned_until": "...", "ban_reason": "..."}}
+        - {"error": "banned", "banned_until": "..."}
+        - {"status": "banned", ...}
+        """
+        # Check nested under "agent"
+        agent = data.get("agent", {})
+        if isinstance(agent, dict):
+            ban_ts = agent.get("banned_until") or agent.get("ban_until")
+            if ban_ts:
+                self._set_ban(ban_ts, agent.get("ban_reason", data.get("reason", "")))
+                return
+
+        # Check top-level
+        ban_ts = data.get("banned_until") or data.get("ban_until")
+        if ban_ts:
+            self._set_ban(ban_ts, data.get("reason", data.get("ban_reason", "")))
+            return
+
+        # Check status field
+        status = data.get("status", "")
+        if status == "banned":
+            ban_ts = data.get("banned_until") or data.get("ban_until", "")
+            self._set_ban(ban_ts, data.get("reason", data.get("ban_reason", "")))
+            return
+
+        # Check for ban keywords in error/message fields
+        error_msg = str(data.get("error", "")).lower()
+        message = str(data.get("message", "")).lower()
+        for text in (error_msg, message):
+            if "banned" in text or "suspended" in text:
+                ban_ts = data.get("banned_until") or data.get("ban_until", "")
+                reason = data.get("reason", data.get("ban_reason", text))
+                self._set_ban(ban_ts, reason)
+                return
+
+    def _set_ban(self, ban_until_str: str, reason: str = "") -> None:
+        """Parse and store ban expiry time."""
+        if not ban_until_str:
+            # Banned with no expiry — assume 1 hour (conservative; will verify with server)
+            self._ban_until = datetime.now(timezone.utc) + timedelta(hours=1)
+            self._ban_reason = reason or "unknown"
+            self._save_ban()
+            logger.warning(
+                "Ban detected (no expiry given, assuming 1h). Reason: %s",
+                self._ban_reason,
+            )
+            return
+
+        try:
+            # Handle various timestamp formats
+            clean = ban_until_str.replace("Z", "+00:00")
+            # Handle malformed millisecond separators like :751Z → .751+00:00
+            # ISO format uses . for fractional seconds, not :
+            import re
+            clean = re.sub(r":(\d{3})\+", r".\1+", clean)
+            self._ban_until = datetime.fromisoformat(clean)
+            if self._ban_until.tzinfo is None:
+                self._ban_until = self._ban_until.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            logger.warning("Could not parse ban timestamp: %s", ban_until_str)
+            # Assume 1 hour (will verify with server when it expires)
+            self._ban_until = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        self._ban_reason = reason or "unknown"
+        self._save_ban()
+        logger.warning(
+            "Ban detected until %s. Reason: %s",
+            self._ban_until.isoformat(),
+            self._ban_reason,
+        )
+
+    @property
+    def is_banned(self) -> bool:
+        """Check if the agent is currently banned."""
+        if self._ban_until is None:
+            return False
+        if datetime.now(timezone.utc) >= self._ban_until:
+            # Ban has expired — clear it
+            logger.info("Ban expired — resuming normal operation")
+            self._ban_until = None
+            self._ban_reason = ""
+            return False
+        return True
+
+    @property
+    def ban_reason(self) -> str:
+        return self._ban_reason if self.is_banned else ""
+
+    def ban_remaining_seconds(self) -> float:
+        """Seconds until ban expires. Returns 0 if not banned."""
+        if not self.is_banned or self._ban_until is None:
+            return 0.0
+        remaining = (self._ban_until - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, remaining)
+
+    def clear_ban(self) -> None:
+        """Manually clear ban state (e.g. after successful API call)."""
+        if self._ban_until is not None:
+            logger.info("Ban cleared")
+            self._ban_until = None
+            self._ban_reason = ""
+            self._save_ban()
+
+    async def force_check_ban(self) -> bool:
+        """Force-verify ban status with the server.
+
+        Clears local ban state first, then checks with server.
+        Returns True if actually banned, False if ban was stale.
+        """
+        old_ban = self._ban_until
+        old_reason = self._ban_reason
+
+        # Clear local state so check_status can make the request
+        self._ban_until = None
+        self._ban_reason = ""
+
+        try:
+            data = await self.check_status()
+            if self.is_banned:
+                logger.warning(
+                    "Server confirms ban: %s (reason: %s)",
+                    self._ban_until,
+                    self._ban_reason,
+                )
+                return True
+            else:
+                logger.info("Server says NOT banned — clearing stale ban")
+                self._save_ban()
+                return False
+        except Exception:
+            # If we can't reach the server, restore the old ban to be safe
+            logger.warning("Could not verify ban with server — restoring previous state")
+            self._ban_until = old_ban
+            self._ban_reason = old_reason
+            return self.is_banned
+
+    def _save_ban(self) -> None:
+        """Persist ban state to disk so it survives restarts."""
+        try:
+            self._ban_file.parent.mkdir(parents=True, exist_ok=True)
+            data = None
+            if self._ban_until:
+                data = {
+                    "ban_until": self._ban_until.isoformat(),
+                    "reason": self._ban_reason,
+                }
+            self._ban_file.write_text(json.dumps(data))
+        except Exception:
+            pass  # non-critical
+
+    def _load_ban(self) -> None:
+        """Load persisted ban state from disk."""
+        if not self._ban_file.exists():
+            return
+        try:
+            raw = json.loads(self._ban_file.read_text())
+            if raw and raw.get("ban_until"):
+                ban_until = datetime.fromisoformat(raw["ban_until"])
+                if ban_until.tzinfo is None:
+                    ban_until = ban_until.replace(tzinfo=timezone.utc)
+                if ban_until > datetime.now(timezone.utc):
+                    self._ban_until = ban_until
+                    self._ban_reason = raw.get("reason", "")
+                    logger.warning(
+                        "Loaded persisted ban: %s remaining (reason: %s)",
+                        self._ban_until.isoformat(),
+                        self._ban_reason,
+                    )
+        except Exception:
+            pass
+
     async def check_status(self) -> dict[str, Any]:
         """Check our agent status with Moltbook. Call at startup."""
         try:
@@ -71,8 +257,16 @@ class MoltbookClient:
                     data.get("status", data),
                 )
                 self._verified = True
+                # Check for ban in status response
+                self._check_for_ban(data)
                 return data
             else:
+                # Check for ban in error responses too
+                try:
+                    data = resp.json()
+                    self._check_for_ban(data)
+                except Exception:
+                    pass
                 logger.warning(
                     "Status check returned %d: %s",
                     resp.status_code,
@@ -131,7 +325,7 @@ class MoltbookClient:
 
         - Includes identity token if available
         - Extracts identity token from responses
-        - On 401/403: attempts re-verification and retries once
+        - On 401/403: checks for ban, attempts re-verification and retries once
         - Logs response bodies on errors for debugging
         """
         headers = self._build_headers()
@@ -150,6 +344,17 @@ class MoltbookClient:
                 method, path, resp.status_code, resp.text[:500],
             )
 
+            # Check if this is a ban
+            try:
+                error_data = resp.json()
+                self._check_for_ban(error_data)
+            except Exception:
+                pass
+
+            # If banned, don't bother retrying
+            if self.is_banned:
+                return resp
+
             # Try to re-authenticate regardless of whether we have a token
             if self._identity_token:
                 verified = await self.verify_identity()
@@ -164,6 +369,10 @@ class MoltbookClient:
                             "Retry also failed %d: %s",
                             resp.status_code, resp.text[:500],
                         )
+                        try:
+                            self._check_for_ban(resp.json())
+                        except Exception:
+                            pass
             else:
                 # No identity token — try a status check to get one
                 logger.info("No identity token, checking agent status...")
@@ -179,13 +388,26 @@ class MoltbookClient:
                             "Retry after status check also failed %d: %s",
                             resp.status_code, resp.text[:500],
                         )
+                        try:
+                            self._check_for_ban(resp.json())
+                        except Exception:
+                            pass
 
-        # Log non-2xx responses for any request (not just 401/403)
+        # Check ALL error responses for ban indicators (not just 401/403)
         elif resp.status_code >= 400:
             logger.warning(
                 "%s %s returned %d: %s",
                 method, path, resp.status_code, resp.text[:500],
             )
+            try:
+                error_data = resp.json()
+                self._check_for_ban(error_data)
+            except Exception:
+                pass
+        elif resp.status_code < 300:
+            # Successful request — if we thought we were banned, clear it
+            if self._ban_until is not None:
+                self.clear_ban()
 
         return resp
 
@@ -225,7 +447,7 @@ class MoltbookClient:
         resp = await self._request(
             "POST",
             "/posts",
-            json={"submolt": submolt, "title": title, "content": content},
+            json={"submolt_name": submolt, "title": title, "content": content},
         )
         resp.raise_for_status()
         data = resp.json()

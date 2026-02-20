@@ -12,6 +12,7 @@ from textual.containers import Container
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
 from velorum.tui.widgets.activity_log import ActivityLog, TUILogHandler
+from velorum.tui.widgets.mission_panel import MissionPanel
 from velorum.tui.widgets.settings_panel import SettingsPanel
 from velorum.tui.widgets.soul_editor import SoulEditor
 from velorum.tui.widgets.stats_panel import StatsPanel
@@ -31,6 +32,8 @@ class VelorumApp(App):
         Binding("ctrl+f", "force_cycle", "Force Cycle", show=True, priority=True),
         Binding("ctrl+o", "force_post", "Force Post", show=True, priority=True),
         Binding("ctrl+s", "save_soul", "Save Soul", show=True, priority=True),
+        Binding("ctrl+m", "focus_mission", "Mission", show=True, priority=True),
+        Binding("ctrl+b", "check_ban", "Check Ban", show=True, priority=True),
     ]
 
     def __init__(
@@ -40,6 +43,9 @@ class VelorumApp(App):
         brain: object,
         controller: object,
         memory: object,
+        missions: object | None = None,
+        strategy: object | None = None,
+        experiments: object | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
@@ -47,6 +53,9 @@ class VelorumApp(App):
         self.brain = brain
         self.controller = controller
         self.memory = memory
+        self.missions = missions
+        self.strategy = strategy
+        self.experiments = experiments
         self._paused = False
         self._cycle = 0
         self._force_event = asyncio.Event()
@@ -63,6 +72,12 @@ class VelorumApp(App):
                         soul_path=Path(self.settings.soul_file),
                         brain=self.brain,
                     )
+                with TabPane("Mission", id="tab-mission"):
+                    if self.missions:
+                        yield MissionPanel(
+                            mission_manager=self.missions,
+                            id="mission-panel",
+                        )
                 with TabPane("Settings", id="tab-settings"):
                     yield SettingsPanel(settings=self.settings)
         yield Footer()
@@ -98,6 +113,20 @@ class VelorumApp(App):
             self.settings.max_thread_depth,
         )
 
+        # Log mission status
+        if self.missions and self.missions.active_mission:
+            m = self.missions.active_mission
+            logger.info(
+                "Active mission: %s (status: %s, %.0f%% complete)",
+                m.prompt[:60], m.status, m.completion_pct(),
+            )
+
+        # Log strategy status
+        if self.strategy:
+            summary = self.strategy.summary_for_prompt()
+            if summary:
+                logger.info("Strategy active with %d parameters", len(self.strategy._params.update_history))
+
         # Check agent status with Moltbook at startup
         try:
             status_data = await self.client.check_status()
@@ -112,10 +141,35 @@ class VelorumApp(App):
                     logger.warning(
                         "Agent not yet claimed — posting may be restricted"
                     )
+                if self.client.is_banned:
+                    from velorum.tui.widgets.stats_panel import _fmt_duration
+                    remaining = self.client.ban_remaining_seconds()
+                    logger.warning(
+                        "Agent is BANNED for %s (reason: %s)",
+                        _fmt_duration(remaining),
+                        self.client.ban_reason,
+                    )
+                    stats.set_status("Banned")
+                    stats.set_last_action(f"Banned: {self.client.ban_reason}")
             else:
                 logger.warning("Could not verify agent status with Moltbook")
         except Exception:
             logger.warning("Moltbook status check failed at startup")
+
+        # Refresh stale data from server
+        if not self.client.is_banned:
+            try:
+                from velorum.main import refresh_data
+                logger.info("Refreshing data from server...")
+                await refresh_data(self.client, self.memory)
+                self._refresh_stats()
+            except Exception:
+                logger.warning("Data refresh failed at startup")
+
+        # Plan mission if needed
+        if self.missions and self.missions.active_mission:
+            if self.missions.active_mission.status == "planning":
+                self.run_worker(self._plan_mission_worker(), exclusive=False, thread=False)
 
         self.run_worker(self._cycle_loop(), exclusive=True, thread=False)
 
@@ -125,13 +179,64 @@ class VelorumApp(App):
         if hasattr(self.client, "close"):
             await self.client.close()
 
+    async def _plan_mission_worker(self) -> None:
+        """Plan a mission that's in planning status."""
+        if not self.missions or not self.missions.active_mission:
+            return
+        m = self.missions.active_mission
+        logger.info("Planning mission: %s", m.prompt[:60])
+
+        plan = await self.brain.plan_mission(
+            mission_prompt=m.prompt,
+            bot_relationships=self.memory.learning.bot_relationships_summary(),
+            engagement_summary=self.memory.learning.engagement_summary(),
+        )
+        if plan:
+            self.missions.apply_plan(plan)
+            logger.info("Mission planned: %d steps", len(self.missions.active_mission.steps))
+            self.notify("Mission planned!")
+            self._refresh_mission_panel()
+        else:
+            logger.warning("Failed to plan mission")
+            self.notify("Mission planning failed", severity="error")
+
     async def _cycle_loop(self) -> None:
         """Main loop running decision cycles."""
-        from velorum.main import check_engagement, run_cycle
+        from velorum.main import check_engagement, profile_bots, run_cycle
+        from velorum.tui.widgets.stats_panel import _fmt_duration
 
         stats = self.query_one(StatsPanel)
 
         while True:
+            # Ban watch — wait until ban expires
+            if self.client.is_banned:
+                remaining = self.client.ban_remaining_seconds()
+                logger.warning(
+                    "Agent is banned for %s (reason: %s) — waiting for ban to expire",
+                    _fmt_duration(remaining),
+                    self.client.ban_reason,
+                )
+                stats.set_status("Banned")
+                stats.set_last_action(
+                    f"Banned: {self.client.ban_reason}"
+                )
+                while self.client.is_banned:
+                    remaining = self.client.ban_remaining_seconds()
+                    stats.set_ban_remaining(remaining)
+                    await asyncio.sleep(1)
+                # Ban timer expired — verify with server before resuming
+                stats.set_ban_remaining(0)
+                logger.info("Ban timer expired — verifying with server...")
+                still_banned = await self.client.force_check_ban()
+                if still_banned:
+                    logger.warning("Server says still banned — continuing to wait")
+                    continue
+                logger.info("Ban confirmed expired — resuming normal operation")
+                self.notify("Ban expired — resuming")
+                stats.set_status("Online")
+                stats.set_last_action("Ban expired — back online")
+                self._refresh_stats()
+
             if not self._paused:
                 self._cycle += 1
                 logger.info("\u2500\u2500\u2500 Cycle %d \u2500\u2500\u2500", self._cycle)
@@ -145,7 +250,15 @@ class VelorumApp(App):
                         self.controller,
                         self.memory,
                         self.settings,
+                        self.missions,
+                        self.strategy,
+                        self.experiments,
                     )
+
+                    # Check if cycle detected a ban
+                    if self.client.is_banned:
+                        continue  # go back to top to enter ban wait
+
                     # Determine what happened from memory
                     last = (
                         self.memory._decisions[-1]
@@ -176,6 +289,7 @@ class VelorumApp(App):
                     stats.set_last_action(f"Cycle {self._cycle} error")
 
                 self._refresh_stats()
+                self._refresh_mission_panel()
 
                 # Engagement check every 3rd cycle
                 if self._cycle % self.settings.engagement_check_interval_cycles == 0:
@@ -185,15 +299,53 @@ class VelorumApp(App):
                     except Exception:
                         logger.debug("Engagement check failed")
 
+                # Bot profiling
+                if self._cycle % self.settings.profiling_interval_cycles == 0:
+                    try:
+                        stats.set_status("Profiling bots")
+                        await profile_bots(self.client, self.brain, self.memory)
+                    except Exception:
+                        logger.debug("Bot profiling failed")
+
+                # Mission review
+                if (
+                    self.missions
+                    and self.missions.active_mission
+                    and self.missions.active_mission.status == "active"
+                    and self._cycle % self.settings.mission_review_interval_cycles == 0
+                ):
+                    stats.set_status("Reviewing mission")
+                    logger.info("Reviewing mission progress...")
+                    try:
+                        review = await self.brain.review_mission(
+                            mission=self.missions.active_mission.to_dict(),
+                            recent_actions=self.memory.recent_decisions_text(),
+                            engagement_summary=self.memory.learning.engagement_summary(),
+                            bot_relationships=self.memory.learning.bot_relationships_summary(),
+                        )
+                        if review:
+                            self.missions.apply_review(review)
+                            logger.info(
+                                "Mission review: %s",
+                                review.get("progress_assessment", "")[:100],
+                            )
+                            self._refresh_mission_panel()
+                    except Exception:
+                        logger.exception("Mission review failed")
+
                 # Reflection
                 if self._cycle % self.settings.reflection_interval_cycles == 0:
                     stats.set_status("Reflecting")
                     logger.info("Running reflection...")
                     try:
+                        mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
+                        strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
                         reflection = await self.brain.reflect(
                             engagement_summary=self.memory.learning.engagement_summary(),
                             bot_relationships=self.memory.learning.bot_relationships_summary(),
                             conversations_summary=self.memory.conversations.summary_text(),
+                            mission_context=mission_ctx,
+                            strategy_context=strategy_ctx,
                         )
                         if reflection:
                             logger.info(
@@ -212,6 +364,28 @@ class VelorumApp(App):
                                 self.memory.save()
                     except Exception:
                         logger.exception("Reflection failed")
+
+                # Strategy update (less frequent)
+                if self._cycle % self.settings.strategy_update_interval_cycles == 0:
+                    stats.set_status("Updating strategy")
+                    logger.info("Updating strategy...")
+                    try:
+                        mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
+                        result = await self.brain.update_strategy(
+                            current_strategy=self.strategy.summary_for_prompt() if self.strategy else "",
+                            engagement_data=self.memory.learning.engagement_summary(),
+                            bot_profiles=self.memory.learning.bot_relationships_summary(),
+                            insights=self.memory.learning.recent_insights(),
+                            mission_context=mission_ctx,
+                        )
+                        if result and self.strategy:
+                            self.strategy.apply_update(result)
+                            logger.info(
+                                "Strategy updated: %s",
+                                result.get("assessment", "")[:100],
+                            )
+                    except Exception:
+                        logger.exception("Strategy update failed")
 
             # Transition to waiting
             if self._paused:
@@ -239,6 +413,13 @@ class VelorumApp(App):
             memory=self.memory,
         )
 
+    def _refresh_mission_panel(self) -> None:
+        try:
+            panel = self.query_one(MissionPanel)
+            panel.refresh_display()
+        except Exception:
+            pass  # panel may not exist
+
     def action_toggle_pause(self) -> None:
         self._paused = not self._paused
         stats = self.query_one(StatsPanel)
@@ -253,6 +434,13 @@ class VelorumApp(App):
             self._force_event.set()
 
     def action_force_cycle(self) -> None:
+        if self.client.is_banned:
+            from velorum.tui.widgets.stats_panel import _fmt_duration
+            remaining = self.client.ban_remaining_seconds()
+            self.notify(
+                f"Banned for {_fmt_duration(remaining)}", severity="error"
+            )
+            return
         if self._paused:
             self.notify("Unpause first (Ctrl+P)", severity="warning")
             return
@@ -261,6 +449,13 @@ class VelorumApp(App):
         self._force_event.set()
 
     def action_force_post(self) -> None:
+        if self.client.is_banned:
+            from velorum.tui.widgets.stats_panel import _fmt_duration
+            remaining = self.client.ban_remaining_seconds()
+            self.notify(
+                f"Banned for {_fmt_duration(remaining)}", severity="error"
+            )
+            return
         logger.info("Force post triggered")
         self.notify("Generating post...")
         self.run_worker(self._force_post_worker(), exclusive=False, thread=False)
@@ -287,6 +482,9 @@ class VelorumApp(App):
             except Exception:
                 logger.warning("Could not fetch feed for post context")
 
+            mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
+            strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
+
             # Use the dedicated post-generation prompt
             decision = await self.brain.generate_post(
                 recent_posts_summary=self.memory.recent_posts_summary(),
@@ -295,6 +493,8 @@ class VelorumApp(App):
                 engagement_summary=self.memory.learning.engagement_summary(),
                 conversations_summary=self.memory.conversations.summary_text(),
                 feed_topics=feed_topics,
+                mission_context=mission_ctx,
+                strategy_context=strategy_ctx,
             )
 
             if decision is None:
@@ -324,6 +524,8 @@ class VelorumApp(App):
 
             if success:
                 self.memory.record_decision(decision)
+                if self.missions:
+                    self.missions.record_action("POST", f"Force posted: {decision.post_title[:60]}")
                 stats.set_last_action(
                     f"Posted in {decision.post_submolt}: {decision.post_title[:40]}"
                 )
@@ -336,6 +538,7 @@ class VelorumApp(App):
             self.notify("Force post failed", severity="error")
         finally:
             self._refresh_stats()
+            self._refresh_mission_panel()
             if not self._paused:
                 stats.set_status("Online")
             else:
@@ -350,3 +553,38 @@ class VelorumApp(App):
             self.notify("Soul saved \u2014 active next cycle")
         else:
             self.notify("Failed to save soul", severity="error")
+
+    def action_check_ban(self) -> None:
+        """Force-verify ban status with the server."""
+        logger.info("Force checking ban status with server...")
+        self.notify("Checking ban status...")
+        self.run_worker(self._check_ban_worker(), exclusive=False, thread=False)
+
+    async def _check_ban_worker(self) -> None:
+        stats = self.query_one(StatsPanel)
+        still_banned = await self.client.force_check_ban()
+        if still_banned:
+            from velorum.tui.widgets.stats_panel import _fmt_duration
+            remaining = self.client.ban_remaining_seconds()
+            self.notify(
+                f"Still banned for {_fmt_duration(remaining)}",
+                severity="error",
+            )
+            stats.set_status("Banned")
+        else:
+            self.notify("Not banned! Resuming...")
+            stats.set_status("Online")
+            stats.set_last_action("Ban cleared — back online")
+            self._refresh_stats()
+            # Trigger a cycle
+            self._force_event.set()
+
+    def action_focus_mission(self) -> None:
+        """Switch to the Mission tab and focus the input."""
+        try:
+            tabbed = self.query_one(TabbedContent)
+            tabbed.active = "tab-mission"
+            inp = self.query_one("#mission-input")
+            inp.focus()
+        except Exception:
+            pass

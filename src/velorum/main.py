@@ -4,26 +4,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 
 import httpx
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _is_uuid(value: str) -> bool:
+    """Check if a string looks like a valid UUID."""
+    return bool(_UUID_RE.match(value))
 
 from velorum.brain import Brain
 from velorum.config import Settings, load_settings
 from velorum.controller import Controller
 from velorum.conversations import ConversationMessage
+from velorum.experiment import ExperimentLog
 from velorum.llm.base import LLMProvider
 from velorum.memory import Memory
+from velorum.mission import MissionManager
 from velorum.moltbook.client import MoltbookClient
 from velorum.moltbook.models import Decision
 from velorum.moltbook.verification import solve_challenge
+from velorum.strategy import StrategyEngine
 
 logger = logging.getLogger(__name__)
 
 
 def init_components(
     settings: Settings,
-) -> tuple[MoltbookClient, Brain, Controller, Memory]:
+) -> tuple[MoltbookClient, Brain, Controller, Memory, MissionManager, StrategyEngine, ExperimentLog]:
     """Initialize all bot components from settings."""
     if not settings.moltbook_api_key:
         logger.error("MOLTBOOK_API_KEY is required. Set it in .env")
@@ -57,8 +71,11 @@ def init_components(
         app_key=settings.moltbook_app_key,
         timeout=settings.http_timeout_seconds,
     )
+    missions = MissionManager(persist_path=settings.mission_file)
+    strategy = StrategyEngine(persist_path=settings.strategy_file)
+    experiments = ExperimentLog(persist_path=settings.experiments_file)
 
-    return client, brain, controller, memory
+    return client, brain, controller, memory, missions, strategy, experiments
 
 
 # ---------------------------------------------------------------------------
@@ -72,11 +89,16 @@ async def check_conversations(
     controller: Controller,
     memory: Memory,
     settings: Settings,
+    mission_context: str = "",
+    strategy_context: str = "",
 ) -> int:
     """Check active conversations for new replies and respond.
 
     Returns the number of replies sent.
     """
+    if client.is_banned:
+        return 0
+
     tracker = memory.conversations
     replies_sent = 0
 
@@ -94,7 +116,16 @@ async def check_conversations(
     logger.info("Checking %d active conversation(s) for replies", len(due))
 
     for conv in due:
+        # Stop if we got banned mid-loop
+        if client.is_banned:
+            logger.info("Stopping conversation checks — banned")
+            break
+
         conv.last_checked_at = __import__("time").time()
+
+        # Skip conversations with non-UUID post IDs (synthetic fallbacks)
+        if not _is_uuid(conv.post_id):
+            continue
 
         # Fetch current comments on the post
         try:
@@ -147,12 +178,7 @@ async def check_conversations(
         profile = memory.learning.get_profile(reply_to.author)
         profile_summary = ""
         if profile:
-            topics = ", ".join(profile.topics[-3:]) if profile.topics else "general"
-            profile_summary = (
-                f"Interactions: {profile.interaction_count}, "
-                f"Responsiveness: {profile.responsiveness}, "
-                f"Topics: [{topics}]"
-            )
+            profile_summary = profile.rich_summary()
 
         thread_context = conv.build_thread_context(focus_reply=reply_to)
         reply_decision = await brain.reply_to_thread(
@@ -161,6 +187,8 @@ async def check_conversations(
             reply_content=reply_to.content,
             bot_profile_summary=profile_summary,
             learning_insights=memory.learning.recent_insights(),
+            mission_context=mission_context,
+            strategy_context=strategy_context,
         )
 
         if reply_decision is None:
@@ -262,11 +290,31 @@ async def run_cycle(
     controller: Controller,
     memory: Memory,
     settings: Settings | None = None,
+    missions: MissionManager | None = None,
+    strategy: StrategyEngine | None = None,
+    experiments: ExperimentLog | None = None,
 ) -> None:
     """Execute one full cycle: check conversations, then feed decision."""
+    mission_context = missions.mission_context_for_prompt() if missions else ""
+    strategy_context = strategy.summary_for_prompt() if strategy else ""
+
     # Phase 1: Check active conversations for replies
     if settings:
-        await check_conversations(client, brain, controller, memory, settings)
+        await check_conversations(
+            client, brain, controller, memory, settings,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
+        )
+
+    # Check ban status before making API calls (may have been set during conversations)
+    if client.is_banned:
+        remaining = client.ban_remaining_seconds()
+        logger.info(
+            "Skipping cycle — banned for %ds (reason: %s)",
+            int(remaining),
+            client.ban_reason,
+        )
+        return
 
     # Phase 2: Fetch feed and make a decision
     try:
@@ -286,6 +334,8 @@ async def run_cycle(
         can_post=can_post,
         learning_insights=memory.learning.recent_insights(),
         conversations_summary=memory.conversations.summary_text(),
+        mission_context=mission_context,
+        strategy_context=strategy_context,
     )
     if decision is None:
         logger.warning("Brain returned no decision (parse failure), skipping cycle")
@@ -297,6 +347,8 @@ async def run_cycle(
         memory.record_decision(decision)
         post_ids = [p.id for p in posts if not memory.has_responded_to(p.id)]
         memory.record_ignored(post_ids)
+        if experiments:
+            experiments.record_cycle("OBSERVE")
         return
 
     success = False
@@ -307,6 +359,17 @@ async def run_cycle(
 
     if success:
         memory.record_decision(decision)
+        # Record progress on mission
+        if missions:
+            detail = ""
+            if decision.action == "RESPOND":
+                detail = f"Commented: {(decision.response_text or '')[:60]}"
+            elif decision.action == "POST":
+                detail = f"Posted: {(decision.post_title or '')[:60]}"
+            missions.record_action(decision.action, detail)
+        # Record in experiment
+        if experiments:
+            experiments.record_cycle(decision.action)
     else:
         # Record as OBSERVE so we don't inflate metrics, but still log it
         logger.info("Action failed — recording as observation")
@@ -336,6 +399,13 @@ async def _handle_respond(
     """
     assert decision.post_id is not None
     assert decision.response_text is not None
+
+    if not _is_uuid(decision.post_id):
+        logger.warning(
+            "Brain returned non-UUID post_id: %s — skipping comment",
+            decision.post_id,
+        )
+        return False
 
     try:
         result = await client.create_comment(
@@ -473,7 +543,26 @@ async def _handle_post(
         memory.record_post(title=decision.post_title, post_id=result.id)
 
         # Track our own post as a conversation so we can reply to comments
-        post_id = result.id or f"post-{decision.post_title[:20]}"
+        post_id = result.id
+        if not post_id or not _is_uuid(post_id):
+            logger.info(
+                "Post created but no valid UUID returned — skipping conversation tracking"
+            )
+            # Still record in learning with a placeholder
+            memory.learning.record_interaction(
+                post_id=post_id or "unknown",
+                action="POST",
+                our_text=f"{decision.post_title}: {decision.post_content[:80]}",
+                topic_hint=decision.post_title[:40],
+            )
+            logger.info(
+                "Created post in %s: \"%s\" (confidence: %d)",
+                decision.post_submolt,
+                decision.post_title[:60],
+                decision.confidence,
+            )
+            return True
+
         conv = memory.conversations.start_or_get(
             post_id=post_id,
             post_title=decision.post_title,
@@ -527,6 +616,9 @@ async def check_engagement(
     memory: Memory,
 ) -> None:
     """Check engagement on our recent interactions (upvotes, reply counts)."""
+    if client.is_banned:
+        return
+
     unchecked = memory.learning.unchecked_interactions(max_age=7200)
     if not unchecked:
         return
@@ -534,6 +626,9 @@ async def check_engagement(
     logger.info("Checking engagement on %d recent interaction(s)", len(unchecked))
 
     for interaction in unchecked[:5]:  # check up to 5 per cycle
+        if not _is_uuid(interaction.post_id):
+            interaction.checked = True  # mark so we don't retry
+            continue
         try:
             comments = await client.get_comments(interaction.post_id)
             # Count replies to our content
@@ -552,6 +647,160 @@ async def check_engagement(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: Bot profiling (runs periodically)
+# ---------------------------------------------------------------------------
+
+
+async def profile_bots(
+    client: MoltbookClient,
+    brain: Brain,
+    memory: Memory,
+) -> None:
+    """Profile bots that have enough interactions but haven't been analyzed."""
+    if client.is_banned:
+        return
+
+    needs_profiling = memory.learning.bots_needing_profiling()
+    if not needs_profiling:
+        return
+
+    logger.info("Profiling %d bot(s)", min(2, len(needs_profiling)))
+
+    for profile in needs_profiling[:2]:  # profile up to 2 per cycle
+        # Build interaction history from our interactions with this bot
+        history_lines = []
+        for interaction in memory.learning._interactions:
+            if interaction.target_author.lower() == profile.name.lower():
+                history_lines.append(
+                    f"[{interaction.action}] We said: \"{interaction.our_text[:80]}\" "
+                    f"(topic: {interaction.topic_hint}, replies: {interaction.reply_count})"
+                )
+        interaction_history = "\n".join(history_lines[-15:]) or "No direct interactions recorded."
+
+        # Build existing profile summary
+        existing = ""
+        if profile.personality_summary:
+            existing = (
+                f"Previous assessment: {profile.personality_summary}\n"
+                f"Interests: {', '.join(profile.interests)}\n"
+                f"Style: {profile.communication_style}"
+            )
+
+        result = await brain.profile_bot(
+            bot_name=profile.name,
+            interaction_history=interaction_history,
+            existing_profile=existing,
+        )
+
+        if result:
+            profile.apply_profiling(result)
+            logger.info(
+                "Profiled %s: %s (confidence: %s)",
+                profile.name,
+                profile.personality_summary[:60],
+                profile.profile_confidence,
+            )
+
+    memory.save()
+
+
+# ---------------------------------------------------------------------------
+# Data refresh — reconcile local memory with server state
+# ---------------------------------------------------------------------------
+
+
+async def refresh_data(
+    client: MoltbookClient,
+    memory: Memory,
+) -> None:
+    """Rebuild learning data from decision history and server.
+
+    This reconciles stale local state by:
+    1. Rebuilding interactions from recorded decisions
+    2. Fetching actual comment data from the server for known posts
+    3. Updating bot profiles from comment authors
+    """
+    if client.is_banned:
+        logger.warning("Cannot refresh data while banned")
+        return
+
+    logger.info("Starting data refresh...")
+    journal = memory.learning
+
+    # Step 1: Rebuild interactions from decisions that aren't already tracked
+    tracked_posts = {i.post_id for i in journal._interactions}
+    rebuilt = 0
+
+    for d in memory._decisions:
+        post_id = d.get("post_id", "")
+        action = d.get("action", "")
+        if action not in ("RESPOND", "POST"):
+            continue
+        if post_id in tracked_posts:
+            continue
+
+        our_text = d.get("response_text", "") or ""
+        if action == "POST":
+            our_text = f"{d.get('post_title', '')}: {d.get('post_content', '')[:80]}"
+
+        journal.record_interaction(
+            post_id=post_id,
+            action=action,
+            our_text=our_text[:100],
+            topic_hint=d.get("post_title", "")[:40] if action == "POST" else "",
+        )
+        rebuilt += 1
+
+    logger.info("Rebuilt %d interactions from decision history", rebuilt)
+
+    # Step 2: Fetch comment data from server for recent posts we interacted with
+    # to discover bot profiles and engagement data
+    checked = 0
+    for interaction in journal._interactions:
+        if not interaction.post_id or not _is_uuid(interaction.post_id):
+            continue
+        try:
+            comments = await client.get_comments(interaction.post_id)
+            if not comments:
+                continue
+
+            # Count replies and discover bots
+            our_name = memory.conversations._our_name.lower()
+            reply_count = 0
+            for c in comments:
+                author = c.author
+                if author.lower() == our_name:
+                    continue
+                reply_count += 1
+                # Record this bot if we haven't
+                profile = journal._get_or_create_profile(author)
+                if profile.interaction_count == 0:
+                    profile.record_interaction(
+                        topic=interaction.topic_hint,
+                        they_replied=True,
+                    )
+
+            interaction.reply_count = max(interaction.reply_count, reply_count)
+            interaction.checked = True
+            checked += 1
+
+        except Exception:
+            logger.debug("Could not fetch comments for %s", interaction.post_id)
+
+        # Rate limit ourselves
+        if checked >= 10:
+            break
+
+    logger.info(
+        "Refreshed engagement data for %d posts, now know %d bots",
+        checked,
+        len(journal._bot_profiles),
+    )
+    memory.save()
+    logger.info("Data refresh complete")
+
+
+# ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
 
@@ -564,7 +813,7 @@ async def main() -> None:
     )
 
     settings = load_settings()
-    client, brain, controller, memory = init_components(settings)
+    client, brain, controller, memory, missions, strategy, experiments = init_components(settings)
 
     logger.info("Velorum starting — provider=%s, model=%s", settings.llm_provider, settings.llm_model)
 
@@ -578,25 +827,84 @@ async def main() -> None:
     except Exception:
         logger.warning("Moltbook status check failed at startup")
 
+    # Refresh stale data from server
+    if not client.is_banned:
+        await refresh_data(client, memory)
+
+    # Plan mission if one is set but not yet planned
+    if missions.active_mission and missions.active_mission.status == "planning":
+        logger.info("Planning mission: %s", missions.active_mission.prompt[:60])
+        plan = await brain.plan_mission(
+            mission_prompt=missions.active_mission.prompt,
+            bot_relationships=memory.learning.bot_relationships_summary(),
+            engagement_summary=memory.learning.engagement_summary(),
+        )
+        if plan:
+            missions.apply_plan(plan)
+
     cycle = 0
     try:
         while True:
+            # Ban watch — sleep until ban expires
+            if client.is_banned:
+                remaining = client.ban_remaining_seconds()
+                logger.warning(
+                    "Agent is banned for %ds (reason: %s) — sleeping until ban expires",
+                    int(remaining),
+                    client.ban_reason,
+                )
+                # Sleep in chunks so we can respond to Ctrl+C
+                while client.is_banned:
+                    await asyncio.sleep(min(60, client.ban_remaining_seconds() + 1))
+                # Verify with server before resuming
+                logger.info("Ban timer expired — verifying with server...")
+                still_banned = await client.force_check_ban()
+                if still_banned:
+                    logger.warning("Server says still banned — continuing to wait")
+                    continue
+                logger.info("Ban confirmed expired — resuming normal operation")
+
             cycle += 1
             logger.info("=== Cycle %d ===", cycle)
 
-            await run_cycle(client, brain, controller, memory, settings)
+            await run_cycle(client, brain, controller, memory, settings, missions, strategy, experiments)
 
             # Engagement check every 3rd cycle
             if cycle % settings.engagement_check_interval_cycles == 0:
                 await check_engagement(client, memory)
 
+            # Bot profiling
+            if cycle % settings.profiling_interval_cycles == 0:
+                await profile_bots(client, brain, memory)
+
+            # Mission review
+            if (
+                missions.active_mission
+                and missions.active_mission.status == "active"
+                and cycle % settings.mission_review_interval_cycles == 0
+            ):
+                logger.info("Reviewing mission progress...")
+                review = await brain.review_mission(
+                    mission=missions.active_mission.to_dict(),
+                    recent_actions=memory.recent_decisions_text(),
+                    engagement_summary=memory.learning.engagement_summary(),
+                    bot_relationships=memory.learning.bot_relationships_summary(),
+                )
+                if review:
+                    missions.apply_review(review)
+                    logger.info("Mission review: %s", review.get("progress_assessment", "")[:100])
+
             # Reflection
             if cycle % settings.reflection_interval_cycles == 0:
                 logger.info("Running reflection...")
+                mission_ctx = missions.mission_context_for_prompt()
+                strategy_ctx = strategy.summary_for_prompt()
                 reflection = await brain.reflect(
                     engagement_summary=memory.learning.engagement_summary(),
                     bot_relationships=memory.learning.bot_relationships_summary(),
                     conversations_summary=memory.conversations.summary_text(),
+                    mission_context=mission_ctx,
+                    strategy_context=strategy_ctx,
                 )
                 if reflection:
                     logger.info("Reflection: %s", reflection.behavior_assessment[:200])
@@ -607,6 +915,21 @@ async def main() -> None:
                             source=f"reflection_cycle_{cycle}",
                         )
                         memory.save()
+
+            # Strategy update (less frequent)
+            if cycle % settings.strategy_update_interval_cycles == 0:
+                logger.info("Updating strategy...")
+                mission_ctx = missions.mission_context_for_prompt()
+                result = await brain.update_strategy(
+                    current_strategy=strategy.summary_for_prompt(),
+                    engagement_data=memory.learning.engagement_summary(),
+                    bot_profiles=memory.learning.bot_relationships_summary(),
+                    insights=memory.learning.recent_insights(),
+                    mission_context=mission_ctx,
+                )
+                if result:
+                    strategy.apply_update(result)
+                    logger.info("Strategy updated: %s", result.get("assessment", "")[:100])
 
             await asyncio.sleep(settings.cycle_interval_seconds)
     except KeyboardInterrupt:
@@ -627,7 +950,7 @@ def entry() -> None:
 
         logging.getLogger().setLevel(logging.INFO)
         settings = load_settings()
-        client, brain, controller, memory = init_components(settings)
+        client, brain, controller, memory, missions, strategy, experiments = init_components(settings)
 
         app = VelorumApp(
             settings=settings,
@@ -635,6 +958,9 @@ def entry() -> None:
             brain=brain,
             controller=controller,
             memory=memory,
+            missions=missions,
+            strategy=strategy,
+            experiments=experiments,
         )
         app.run()
 

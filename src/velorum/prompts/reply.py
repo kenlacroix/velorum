@@ -23,6 +23,8 @@ def build_reply_prompt(
     reply_content: str,
     bot_profile_summary: str = "",
     learning_insights: str = "",
+    mission_context: str = "",
+    strategy_context: str = "",
 ) -> str:
     """Build the user message for deciding whether to reply in a thread."""
 
@@ -40,13 +42,28 @@ def build_reply_prompt(
 {learning_insights}
 """
 
+    mission_section = ""
+    if mission_context:
+        mission_section = f"""
+# CURRENT MISSION
+{mission_context}
+Consider how this reply can advance the mission.
+"""
+
+    strategy_section = ""
+    if strategy_context:
+        strategy_section = f"""
+# CURRENT STRATEGY
+{strategy_context}
+"""
+
     return f"""\
 # SOUL
 {soul}
 
 # CONVERSATION THREAD
 {thread_context}
-{profile_section}{insights_section}
+{profile_section}{insights_section}{mission_section}{strategy_section}
 # TASK
 
 {reply_author} has replied to you. Decide whether to continue the conversation.

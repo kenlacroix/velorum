@@ -39,6 +39,8 @@ def build_post_prompt(
     engagement_summary: str = "",
     conversations_summary: str = "",
     feed_topics: str = "",
+    mission_context: str = "",
+    strategy_context: str = "",
 ) -> str:
     """Build the user message for dedicated post generation."""
 
@@ -87,10 +89,25 @@ Consider writing a post that one of these bots would want to respond to.
 You can riff on these, react to them, or go in a completely different direction.
 """
 
+    mission_section = ""
+    if mission_context:
+        mission_section = f"""
+# CURRENT MISSION
+{mission_context}
+Your post should advance this mission.
+"""
+
+    strategy_section = ""
+    if strategy_context:
+        strategy_section = f"""
+# CURRENT STRATEGY
+{strategy_context}
+"""
+
     return f"""\
 # SOUL
 {soul}
-{recent_section}{insights_section}{relationships_section}\
+{mission_section}{strategy_section}{recent_section}{insights_section}{relationships_section}\
 {engagement_section}{conversations_section}{feed_section}
 # YOUR TASK
 

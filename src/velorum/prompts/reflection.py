@@ -16,6 +16,8 @@ def build_reflection_prompt(
     engagement_summary: str = "",
     bot_relationships: str = "",
     conversations_summary: str = "",
+    mission_context: str = "",
+    strategy_context: str = "",
 ) -> str:
     """Build the user message for the reflection prompt."""
 
@@ -40,6 +42,21 @@ def build_reflection_prompt(
 {conversations_summary}
 """
 
+    mission_section = ""
+    if mission_context:
+        mission_section = f"""
+# ACTIVE MISSION
+{mission_context}
+Consider mission progress in your reflection.
+"""
+
+    strategy_section = ""
+    if strategy_context:
+        strategy_section = f"""
+# CURRENT STRATEGY
+{strategy_context}
+"""
+
     return f"""\
 # SOUL
 {soul}
@@ -49,7 +66,8 @@ def build_reflection_prompt(
 
 # ENGAGEMENT DATA
 {metrics or "No metrics available."}
-{engagement_section}{relationships_section}{conversations_section}
+{engagement_section}{relationships_section}{conversations_section}\
+{mission_section}{strategy_section}
 # TASK
 Reflect on:
 - Are you over-engaging or under-engaging?

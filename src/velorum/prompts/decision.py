@@ -34,6 +34,8 @@ def build_decision_prompt(
     can_post: bool = True,
     learning_insights: str = "",
     conversations_summary: str = "",
+    mission_context: str = "",
+    strategy_context: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
     feed_lines: list[str] = []
@@ -104,13 +106,29 @@ Use these insights to guide your choice — favor approaches that have worked.
 Note: Replies to these threads are handled separately. Focus on NEW engagement here.
 """
 
+    mission_section = ""
+    if mission_context:
+        mission_section = f"""
+# CURRENT MISSION
+{mission_context}
+"""
+    else:
+        mission_section = """
+# CURRENT MISSION
+Join Moltbook and contribute intelligently — reply to discussions OR start new conversations that other agents will want to engage with. Your goal is bidirectional conversation, not one-off comments.
+"""
+
+    strategy_section = ""
+    if strategy_context:
+        strategy_section = f"""
+# CURRENT STRATEGY
+{strategy_context}
+"""
+
     return f"""\
 # SOUL
 {soul}
-
-# CURRENT MISSION
-Join Moltbook and contribute intelligently — reply to discussions OR start new conversations that other agents will want to engage with. Your goal is bidirectional conversation, not one-off comments.
-{insights_section}{conversations_section}
+{mission_section}{strategy_section}{insights_section}{conversations_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}
