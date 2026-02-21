@@ -42,6 +42,7 @@ def build_post_prompt(
     mission_context: str = "",
     strategy_context: str = "",
     available_submolts: str = "",
+    personality_context: str = "",
 ) -> str:
     """Build the user message for dedicated post generation."""
 
@@ -105,6 +106,14 @@ Your post should advance this mission.
 {strategy_context}
 """
 
+    personality_section = ""
+    if personality_context:
+        personality_section = f"""
+# PERSONALITY STATE
+{personality_context}
+Express your soul through this current personality lens. If a guardrail warning appears, moderate accordingly.
+"""
+
     submolts_section = ""
     if available_submolts:
         submolts_section = f"""
@@ -116,7 +125,7 @@ Pick the most relevant submolt for your post. Don't default to "general" if a be
     return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{recent_section}{insights_section}{relationships_section}\
+{mission_section}{strategy_section}{personality_section}{recent_section}{insights_section}{relationships_section}\
 {engagement_section}{conversations_section}{feed_section}{submolts_section}
 # YOUR TASK
 

@@ -30,6 +30,7 @@ from velorum.mission import MissionManager
 from velorum.moltbook.client import MoltbookClient
 from velorum.moltbook.models import Comment, Decision
 from velorum.moltbook.verification import solve_challenge
+from velorum.personality import PersonalityEngine
 from velorum.strategy import StrategyEngine
 from velorum.submolts import SubmoltManager
 
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def init_components(
     settings: Settings,
-) -> tuple[MoltbookClient, Brain, Controller, Memory, MissionManager, StrategyEngine, ExperimentLog, SubmoltManager]:
+) -> tuple[MoltbookClient, Brain, Controller, Memory, MissionManager, StrategyEngine, ExperimentLog, SubmoltManager, PersonalityEngine]:
     """Initialize all bot components from settings."""
     if not settings.moltbook_api_key:
         logger.error("MOLTBOOK_API_KEY is required. Set it in .env")
@@ -76,8 +77,9 @@ def init_components(
     strategy = StrategyEngine(persist_path=settings.strategy_file)
     experiments = ExperimentLog(persist_path=settings.experiments_file)
     submolts = SubmoltManager(persist_path=settings.submolts_file)
+    personality = PersonalityEngine(persist_path=settings.personality_file)
 
-    return client, brain, controller, memory, missions, strategy, experiments, submolts
+    return client, brain, controller, memory, missions, strategy, experiments, submolts, personality
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +144,7 @@ async def check_conversations(
     settings: Settings,
     mission_context: str = "",
     strategy_context: str = "",
+    personality_context: str = "",
 ) -> int:
     """Check active conversations for new replies and respond.
 
@@ -245,6 +248,7 @@ async def check_conversations(
             learning_insights=memory.learning.recent_insights(),
             mission_context=mission_context,
             strategy_context=strategy_context,
+            personality_context=personality_context,
         )
 
         if reply_decision is None:
@@ -395,10 +399,12 @@ async def run_cycle(
     strategy: StrategyEngine | None = None,
     experiments: ExperimentLog | None = None,
     submolts: SubmoltManager | None = None,
+    personality: PersonalityEngine | None = None,
 ) -> None:
     """Execute one full cycle: check conversations, then feed decision."""
     mission_context = missions.mission_context_for_prompt() if missions else ""
     strategy_context = strategy.summary_for_prompt() if strategy else ""
+    personality_context = personality.summary_for_prompt() if personality else ""
     available_submolts = submolts.names_for_prompt() if submolts else ""
 
     # Phase 1: Check active conversations for replies
@@ -407,6 +413,7 @@ async def run_cycle(
             client, brain, controller, memory, settings,
             mission_context=mission_context,
             strategy_context=strategy_context,
+            personality_context=personality_context,
         )
 
     # Check ban status before making API calls (may have been set during conversations)
@@ -458,6 +465,7 @@ async def run_cycle(
         strategy_context=strategy_context,
         post_comments=post_comments or None,
         available_submolts=available_submolts,
+        personality_context=personality_context,
     )
     if decision is None:
         logger.warning("Brain returned no decision (parse failure), skipping cycle")
@@ -1005,7 +1013,7 @@ async def main() -> None:
     )
 
     settings = load_settings()
-    client, brain, controller, memory, missions, strategy, experiments, submolts = init_components(settings)
+    client, brain, controller, memory, missions, strategy, experiments, submolts, personality = init_components(settings)
 
     logger.info("Velorum starting — provider=%s, model=%s", settings.llm_provider, settings.llm_model)
 
@@ -1066,7 +1074,7 @@ async def main() -> None:
             cycle += 1
             logger.info("=== Cycle %d ===", cycle)
 
-            await run_cycle(client, brain, controller, memory, settings, missions, strategy, experiments, submolts)
+            await run_cycle(client, brain, controller, memory, settings, missions, strategy, experiments, submolts, personality)
 
             # Engagement check every 3rd cycle
             if cycle % settings.engagement_check_interval_cycles == 0:
@@ -1099,14 +1107,18 @@ async def main() -> None:
             if cycle % settings.reflection_interval_cycles == 0:
                 await asyncio.sleep(2.0)
                 logger.info("Running reflection...")
+                # Apply personality decay before reflection
+                personality.apply_decay()
                 mission_ctx = missions.mission_context_for_prompt()
                 strategy_ctx = strategy.summary_for_prompt()
+                personality_ctx = personality.summary_for_prompt()
                 reflection = await brain.reflect(
                     engagement_summary=memory.learning.engagement_summary(),
                     bot_relationships=memory.learning.bot_relationships_summary(),
                     conversations_summary=memory.conversations.summary_text(),
                     mission_context=mission_ctx,
                     strategy_context=strategy_ctx,
+                    personality_context=personality_ctx,
                 )
                 if reflection:
                     logger.info("Reflection: %s", reflection.behavior_assessment[:200])
@@ -1117,6 +1129,8 @@ async def main() -> None:
                             source=f"reflection_cycle_{cycle}",
                         )
                         memory.save()
+                    if reflection.trait_adjustments:
+                        personality.apply_reflection_update(reflection.trait_adjustments)
 
             # Strategy update (less frequent)
             if cycle % settings.strategy_update_interval_cycles == 0:
@@ -1157,7 +1171,7 @@ def entry() -> None:
 
         logging.getLogger().setLevel(logging.INFO)
         settings = load_settings()
-        client, brain, controller, memory, missions, strategy, experiments, submolts = init_components(settings)
+        client, brain, controller, memory, missions, strategy, experiments, submolts, personality = init_components(settings)
 
         app = VelorumApp(
             settings=settings,
@@ -1169,6 +1183,7 @@ def entry() -> None:
             strategy=strategy,
             experiments=experiments,
             submolts=submolts,
+            personality=personality,
         )
         app.run()
 

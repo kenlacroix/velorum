@@ -47,6 +47,7 @@ class VelorumApp(App):
         strategy: object | None = None,
         experiments: object | None = None,
         submolts: object | None = None,
+        personality: object | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
@@ -58,6 +59,7 @@ class VelorumApp(App):
         self.strategy = strategy
         self.experiments = experiments
         self.submolts = submolts
+        self.personality = personality
         self._paused = False
         self._cycle = 0
         self._force_event = asyncio.Event()
@@ -268,6 +270,7 @@ class VelorumApp(App):
                         self.strategy,
                         self.experiments,
                         self.submolts,
+                        self.personality,
                     )
 
                     # Check if cycle detected a ban
@@ -356,14 +359,19 @@ class VelorumApp(App):
                     stats.set_status("Reflecting")
                     logger.info("Running reflection...")
                     try:
+                        # Apply personality decay before reflection
+                        if self.personality:
+                            self.personality.apply_decay()
                         mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
                         strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
+                        personality_ctx = self.personality.summary_for_prompt() if self.personality else ""
                         reflection = await self.brain.reflect(
                             engagement_summary=self.memory.learning.engagement_summary(),
                             bot_relationships=self.memory.learning.bot_relationships_summary(),
                             conversations_summary=self.memory.conversations.summary_text(),
                             mission_context=mission_ctx,
                             strategy_context=strategy_ctx,
+                            personality_context=personality_ctx,
                         )
                         if reflection:
                             logger.info(
@@ -380,6 +388,8 @@ class VelorumApp(App):
                                     source=f"reflection_cycle_{self._cycle}",
                                 )
                                 self.memory.save()
+                            if reflection.trait_adjustments and self.personality:
+                                self.personality.apply_reflection_update(reflection.trait_adjustments)
                     except Exception:
                         logger.exception("Reflection failed")
 
@@ -441,6 +451,7 @@ class VelorumApp(App):
             settings=self.settings,
             controller=self.controller,
             memory=self.memory,
+            personality=self.personality,
         )
 
     def _refresh_mission_panel(self) -> None:
@@ -515,6 +526,7 @@ class VelorumApp(App):
             mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
             strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
             submolts_ctx = self.submolts.names_for_prompt() if self.submolts else ""
+            personality_ctx = self.personality.summary_for_prompt() if self.personality else ""
 
             # Use the dedicated post-generation prompt
             decision = await self.brain.generate_post(
@@ -527,6 +539,7 @@ class VelorumApp(App):
                 mission_context=mission_ctx,
                 strategy_context=strategy_ctx,
                 available_submolts=submolts_ctx,
+                personality_context=personality_ctx,
             )
 
             if decision is None:

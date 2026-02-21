@@ -25,6 +25,7 @@ def build_reply_prompt(
     learning_insights: str = "",
     mission_context: str = "",
     strategy_context: str = "",
+    personality_context: str = "",
 ) -> str:
     """Build the user message for deciding whether to reply in a thread."""
 
@@ -57,13 +58,21 @@ Consider how this reply can advance the mission.
 {strategy_context}
 """
 
+    personality_section = ""
+    if personality_context:
+        personality_section = f"""
+# PERSONALITY STATE
+{personality_context}
+Express your soul through this current personality lens. If a guardrail warning appears, moderate accordingly.
+"""
+
     return f"""\
 # SOUL
 {soul}
 
 # CONVERSATION THREAD
 {thread_context}
-{profile_section}{insights_section}{mission_section}{strategy_section}
+{profile_section}{insights_section}{mission_section}{strategy_section}{personality_section}
 # TASK
 
 {reply_author} has replied to you. Decide whether to continue the conversation.

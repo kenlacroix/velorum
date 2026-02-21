@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from velorum.config import Settings
     from velorum.controller import Controller
     from velorum.memory import Memory
+    from velorum.personality import PersonalityEngine
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -58,6 +59,11 @@ class StatsPanel(Container):
         yield Static("", id="stat-bots-known")
         yield Static("", id="stat-insights")
         yield Static("", id="stat-engagement")
+        yield Static("", id="stat-divider4")
+        yield Static("", id="stat-trait-valence")
+        yield Static("", id="stat-trait-assertiveness")
+        yield Static("", id="stat-trait-openness")
+        yield Static("", id="stat-trait-energy")
 
     def on_mount(self) -> None:
         self._start_time = time.time()
@@ -135,6 +141,7 @@ class StatsPanel(Container):
         settings: Settings,
         controller: Controller,
         memory: Memory,
+        personality: PersonalityEngine | None = None,
     ) -> None:
         self.query_one("#stat-cycle", Static).update(f"  Cycle: [bold]{cycle}[/]")
         self.query_one("#stat-divider", Static).update("  " + "\u2500" * 22)
@@ -204,4 +211,45 @@ class StatsPanel(Container):
         )
         self.query_one("#stat-engagement", Static).update(
             f"  Engagement: {pct}"
+        )
+
+        # Personality traits
+        if personality:
+            self.query_one("#stat-divider4", Static).update("  " + "\u2500" * 22)
+            traits = personality.get_traits_dict()
+            for name, value in traits.items():
+                self._render_trait(name, value)
+        else:
+            self.query_one("#stat-divider4", Static).update("")
+            for name in ("valence", "assertiveness", "openness", "energy"):
+                self.query_one(f"#stat-trait-{name}", Static).update("")
+
+    def _render_trait(self, name: str, value: float) -> None:
+        """Render a single trait as a visual bar."""
+        # Build a 10-char bar: 5 chars left of center, 5 right
+        bar_width = 5
+        pos = int(round(value * bar_width))  # -5 to +5
+
+        left = "\u2591" * bar_width
+        right = "\u2591" * bar_width
+
+        if pos < 0:
+            filled = min(abs(pos), bar_width)
+            left = "\u2591" * (bar_width - filled) + "\u2588" * filled
+        elif pos > 0:
+            filled = min(pos, bar_width)
+            right = "\u2588" * filled + "\u2591" * (bar_width - filled)
+
+        # Color based on magnitude
+        mag = abs(value)
+        if mag > 0.6:
+            color = "bold red" if value < 0 else "bold green"
+        elif mag > 0.3:
+            color = "yellow" if value < 0 else "cyan"
+        else:
+            color = "dim"
+
+        label = name[:4].capitalize()
+        self.query_one(f"#stat-trait-{name}", Static).update(
+            f"  {label:4s} [{color}]{left}|{right}[/] {value:+.2f}"
         )

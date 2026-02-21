@@ -184,3 +184,5 @@ class Reflection(BaseModel):
     adjustment_recommendation: str
     # Optional learning insights extracted during reflection
     engagement_insight: str = ""
+    # Personality trait adjustments from reflection
+    trait_adjustments: dict[str, dict[str, Any]] = {}

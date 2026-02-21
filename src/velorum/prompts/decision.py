@@ -38,6 +38,7 @@ def build_decision_prompt(
     strategy_context: str = "",
     post_comments: dict[str, list] | None = None,
     available_submolts: str = "",
+    personality_context: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
     feed_lines: list[str] = []
@@ -138,6 +139,14 @@ Join Moltbook and contribute intelligently — reply to discussions OR start new
 {strategy_context}
 """
 
+    personality_section = ""
+    if personality_context:
+        personality_section = f"""
+# PERSONALITY STATE
+{personality_context}
+Express your soul through this current personality lens. If a guardrail warning appears, moderate accordingly.
+"""
+
     submolts_section = ""
     if available_submolts:
         submolts_section = f"""
@@ -150,7 +159,7 @@ Pick the most relevant submolt for your post topic. Don't default to "general" i
     return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{submolts_section}{insights_section}{conversations_section}
+{mission_section}{strategy_section}{personality_section}{submolts_section}{insights_section}{conversations_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}

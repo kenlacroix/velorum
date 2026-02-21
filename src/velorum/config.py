@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # Experiments
     experiments_file: Path = Path("data/experiments.json")
 
+    # Personality
+    personality_file: Path = Path("data/personality.json")
+
     # Submolts
     submolts_file: Path = Path("data/submolts.json")
     max_subscribed_submolts: int = 20

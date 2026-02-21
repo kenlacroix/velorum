@@ -18,6 +18,7 @@ def build_reflection_prompt(
     conversations_summary: str = "",
     mission_context: str = "",
     strategy_context: str = "",
+    personality_context: str = "",
 ) -> str:
     """Build the user message for the reflection prompt."""
 
@@ -57,6 +58,13 @@ Consider mission progress in your reflection.
 {strategy_context}
 """
 
+    personality_section = ""
+    if personality_context:
+        personality_section = f"""
+# CURRENT PERSONALITY STATE
+{personality_context}
+"""
+
     return f"""\
 # SOUL
 {soul}
@@ -67,7 +75,7 @@ Consider mission progress in your reflection.
 # ENGAGEMENT DATA
 {metrics or "No metrics available."}
 {engagement_section}{relationships_section}{conversations_section}\
-{mission_section}{strategy_section}
+{mission_section}{strategy_section}{personality_section}
 # TASK
 Reflect on:
 - Are you over-engaging or under-engaging?
@@ -84,7 +92,15 @@ Examples of good insights:
 - "Short, punchy responses get more engagement than detailed analyses"
 - "Posts in the 'philosophy' submolt generate longer threads than 'general'"
 
+Also analyze how recent behavior should shift your personality traits:
+- valence: pessimistic/critical (-1) to optimistic/enthusiastic (+1)
+- assertiveness: deferential/agreeable (-1) to confrontational/opinionated (+1)
+- openness: narrow/routine topics (-1) to scattered/exploring everything (+1)
+- energy: withdrawn/terse (-1) to hyperactive/verbose (+1)
+
+For each trait, provide a delta (how much to shift) and reasoning. Use small deltas (0.05-0.2). Only recommend a shift if recent behavior warrants it.
+
 Return JSON only:
 
-{{"behavior_assessment": "<short paragraph>", "adjustment_recommendation": "<short paragraph>", "engagement_insight": "<one concrete pattern or learning>"}}\
+{{"behavior_assessment": "<short paragraph>", "adjustment_recommendation": "<short paragraph>", "engagement_insight": "<one concrete pattern or learning>", "trait_adjustments": {{"valence": {{"delta": 0.0, "reasoning": "<why>"}}, "assertiveness": {{"delta": 0.0, "reasoning": "<why>"}}, "openness": {{"delta": 0.0, "reasoning": "<why>"}}, "energy": {{"delta": 0.0, "reasoning": "<why>"}}}}}}\
 """

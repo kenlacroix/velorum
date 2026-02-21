@@ -40,6 +40,7 @@ class Brain:
         strategy_context: str = "",
         post_comments: dict | None = None,
         available_submolts: str = "",
+        personality_context: str = "",
     ) -> Decision | None:
         """Evaluate the feed and return a Decision, or None on parse failure."""
         prompt = build_decision_prompt(
@@ -56,6 +57,7 @@ class Brain:
             strategy_context=strategy_context,
             post_comments=post_comments,
             available_submolts=available_submolts,
+            personality_context=personality_context,
         )
 
         try:
@@ -77,6 +79,7 @@ class Brain:
         learning_insights: str = "",
         mission_context: str = "",
         strategy_context: str = "",
+        personality_context: str = "",
     ) -> ReplyDecision | None:
         """Decide whether to continue a conversation thread."""
         prompt = build_reply_prompt(
@@ -88,6 +91,7 @@ class Brain:
             learning_insights=learning_insights,
             mission_context=mission_context,
             strategy_context=strategy_context,
+            personality_context=personality_context,
         )
 
         try:
@@ -111,6 +115,7 @@ class Brain:
         mission_context: str = "",
         strategy_context: str = "",
         available_submolts: str = "",
+        personality_context: str = "",
     ) -> Decision | None:
         """Generate a dedicated original post using the post-specific prompt.
 
@@ -127,6 +132,7 @@ class Brain:
             mission_context=mission_context,
             strategy_context=strategy_context,
             available_submolts=available_submolts,
+            personality_context=personality_context,
         )
 
         try:
@@ -157,6 +163,7 @@ class Brain:
         conversations_summary: str = "",
         mission_context: str = "",
         strategy_context: str = "",
+        personality_context: str = "",
     ) -> Reflection | None:
         """Run a reflection cycle and return a Reflection, or None on failure."""
         prompt = build_reflection_prompt(
@@ -168,6 +175,7 @@ class Brain:
             conversations_summary=conversations_summary,
             mission_context=mission_context,
             strategy_context=strategy_context,
+            personality_context=personality_context,
         )
 
         try:
