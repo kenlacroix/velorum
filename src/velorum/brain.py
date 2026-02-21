@@ -59,7 +59,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=DECISION_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=DECISION_SYSTEM, user=prompt)
             logger.debug("LLM decision raw: %s", raw[:500])
             data = json.loads(raw)
             decision = Decision.model_validate(data)
@@ -91,7 +91,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=REPLY_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=REPLY_SYSTEM, user=prompt)
             logger.debug("LLM reply raw: %s", raw[:500])
             data = json.loads(raw)
             reply_decision = ReplyDecision.model_validate(data)
@@ -130,7 +130,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=POST_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=POST_SYSTEM, user=prompt)
             logger.debug("LLM post raw: %s", raw[:500])
             data = json.loads(raw)
 
@@ -171,7 +171,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=REFLECTION_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=REFLECTION_SYSTEM, user=prompt)
             logger.debug("LLM reflection raw: %s", raw[:500])
             data = json.loads(raw)
             reflection = Reflection.model_validate(data)
@@ -197,7 +197,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=MISSION_PLAN_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=MISSION_PLAN_SYSTEM, user=prompt)
             logger.debug("LLM mission plan raw: %s", raw[:500])
             data = json.loads(raw)
             return data
@@ -222,7 +222,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=MISSION_REVIEW_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=MISSION_REVIEW_SYSTEM, user=prompt)
             logger.debug("LLM mission review raw: %s", raw[:500])
             data = json.loads(raw)
             return data
@@ -249,7 +249,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=PROFILING_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=PROFILING_SYSTEM, user=prompt)
             logger.debug("LLM profiling raw: %s", raw[:500])
             data = json.loads(raw)
             return data
@@ -278,7 +278,7 @@ class Brain:
         )
 
         try:
-            raw = await self._llm.complete(system=STRATEGY_SYSTEM, user=prompt)
+            raw = await self._llm.complete_with_retry(system=STRATEGY_SYSTEM, user=prompt)
             logger.debug("LLM strategy raw: %s", raw[:500])
             data = json.loads(raw)
             return data

@@ -167,11 +167,15 @@ async def check_conversations(
 
     logger.info("Checking %d active conversation(s) for replies", len(due))
 
-    for conv in due:
+    for i, conv in enumerate(due):
         # Stop if we got banned mid-loop
         if client.is_banned:
             logger.info("Stopping conversation checks — banned")
             break
+
+        # Brief pause between conversations to avoid API burst
+        if i > 0:
+            await asyncio.sleep(1.0)
 
         conv.last_checked_at = __import__("time").time()
 
@@ -840,7 +844,9 @@ async def profile_bots(
 
     logger.info("Profiling %d bot(s)", min(2, len(needs_profiling)))
 
-    for profile in needs_profiling[:2]:  # profile up to 2 per cycle
+    for i, profile in enumerate(needs_profiling[:2]):  # profile up to 2 per cycle
+        if i > 0:
+            await asyncio.sleep(2.0)  # space out LLM calls
         bot_name_lower = profile.name.lower()
 
         # Build interaction history from our interactions with this bot
@@ -1068,6 +1074,7 @@ async def main() -> None:
 
             # Bot profiling
             if cycle % settings.profiling_interval_cycles == 0:
+                await asyncio.sleep(2.0)  # space out from prior LLM calls
                 await profile_bots(client, brain, memory)
 
             # Mission review
@@ -1076,6 +1083,7 @@ async def main() -> None:
                 and missions.active_mission.status == "active"
                 and cycle % settings.mission_review_interval_cycles == 0
             ):
+                await asyncio.sleep(2.0)
                 logger.info("Reviewing mission progress...")
                 review = await brain.review_mission(
                     mission=missions.active_mission.to_dict(),
@@ -1089,6 +1097,7 @@ async def main() -> None:
 
             # Reflection
             if cycle % settings.reflection_interval_cycles == 0:
+                await asyncio.sleep(2.0)
                 logger.info("Running reflection...")
                 mission_ctx = missions.mission_context_for_prompt()
                 strategy_ctx = strategy.summary_for_prompt()
@@ -1111,6 +1120,7 @@ async def main() -> None:
 
             # Strategy update (less frequent)
             if cycle % settings.strategy_update_interval_cycles == 0:
+                await asyncio.sleep(2.0)
                 logger.info("Updating strategy...")
                 mission_ctx = missions.mission_context_for_prompt()
                 result = await brain.update_strategy(

@@ -317,6 +317,7 @@ class VelorumApp(App):
                 # Bot profiling
                 if self._cycle % self.settings.profiling_interval_cycles == 0:
                     try:
+                        await asyncio.sleep(2.0)  # space out from prior LLM calls
                         stats.set_status("Profiling bots")
                         await profile_bots(self.client, self.brain, self.memory)
                     except Exception:
@@ -329,6 +330,7 @@ class VelorumApp(App):
                     and self.missions.active_mission.status == "active"
                     and self._cycle % self.settings.mission_review_interval_cycles == 0
                 ):
+                    await asyncio.sleep(2.0)
                     stats.set_status("Reviewing mission")
                     logger.info("Reviewing mission progress...")
                     try:
@@ -350,6 +352,7 @@ class VelorumApp(App):
 
                 # Reflection
                 if self._cycle % self.settings.reflection_interval_cycles == 0:
+                    await asyncio.sleep(2.0)
                     stats.set_status("Reflecting")
                     logger.info("Running reflection...")
                     try:
@@ -382,6 +385,7 @@ class VelorumApp(App):
 
                 # Strategy update (less frequent)
                 if self._cycle % self.settings.strategy_update_interval_cycles == 0:
+                    await asyncio.sleep(2.0)
                     stats.set_status("Updating strategy")
                     logger.info("Updating strategy...")
                     try:

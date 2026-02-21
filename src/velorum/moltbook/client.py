@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -325,6 +327,7 @@ class MoltbookClient:
 
         - Includes identity token if available
         - Extracts identity token from responses
+        - On 429: retries with exponential backoff + jitter (up to 3 times)
         - On 401/403: checks for ban, attempts re-verification and retries once
         - Logs response bodies on errors for debugging
         """
@@ -336,6 +339,34 @@ class MoltbookClient:
 
         # Extract identity from every response
         self._extract_identity(resp)
+
+        # Handle 429 rate limiting with exponential backoff
+        if resp.status_code == 429:
+            for attempt in range(3):
+                # Parse Retry-After header if present
+                retry_after = resp.headers.get("retry-after")
+                if retry_after and retry_after.isdigit():
+                    delay = float(retry_after)
+                else:
+                    delay = min(2.0 * (2 ** attempt), 60.0)
+                jitter = random.uniform(0, delay * 0.5)
+                wait = delay + jitter
+                logger.warning(
+                    "%s %s rate limited (429), retry %d/3 in %.1fs",
+                    method, path, attempt + 1, wait,
+                )
+                await asyncio.sleep(wait)
+                headers = self._build_headers()
+                resp = await self._http.request(
+                    method, path, json=json, params=params, headers=headers
+                )
+                self._extract_identity(resp)
+                if resp.status_code != 429:
+                    break
+            if resp.status_code == 429:
+                logger.error(
+                    "%s %s still rate limited after 3 retries", method, path
+                )
 
         # Handle auth errors — retry once after re-verification
         if resp.status_code in (401, 403):

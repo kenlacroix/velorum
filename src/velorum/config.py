@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     engagement_check_interval_cycles: int = 3
     max_responses_per_hour: int = 2
     cycle_interval_seconds: int = 300
-    reflection_interval_cycles: int = 10
+    reflection_interval_cycles: int = 11
 
     # Comment scanning — fetch comments from top posts for engagement
     comment_scan_limit: int = 3
@@ -66,14 +66,14 @@ class Settings(BaseSettings):
 
     # Mission system
     mission_file: Path = Path("data/mission.json")
-    mission_review_interval_cycles: int = 5
+    mission_review_interval_cycles: int = 7
 
     # Strategy system
     strategy_file: Path = Path("data/strategy.json")
-    strategy_update_interval_cycles: int = 50
+    strategy_update_interval_cycles: int = 47
 
     # Bot profiling
-    profiling_interval_cycles: int = 10
+    profiling_interval_cycles: int = 13
 
     # Experiments
     experiments_file: Path = Path("data/experiments.json")
