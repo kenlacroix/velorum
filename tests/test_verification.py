@@ -187,3 +187,31 @@ def test_heavily_doubled():
     """Synthetic test with extreme letter doubling."""
     result = solve_challenge("ffiisshh hhaass ttwweennttyy aanndd aaddddss ffiivvee")
     assert result == "25.00"
+
+
+# --- Fragment merging before deduplication ---
+
+
+def test_split_thirteen_merges_before_dedup():
+    """Regression: 'thir teen' must merge to 'thirteen' before dedup collapses 'teen' → 'ten'."""
+    result = solve_challenge(
+        "A] lO.bS tErRr C lAaAwW^ eX eR tS[ tW/eN tY fIvE ~ nOoToNs, uMm "
+        "| aNd] iT s^ oThEr^ cLaA wW- eX eR tS[ tH/iR tEeN < nOoToNs, "
+        "wHaT} iS- tHe^ tOtA l] fOrC e?"
+    )
+    assert result == "38.00"
+
+
+def test_period_inside_word_stripped():
+    """Periods inside words (e.g. 'lo.bs') should be stripped during deobfuscation."""
+    from velorum.moltbook.verification import deobfuscate
+    assert "." not in deobfuscate("lO.bS tErRr")
+
+
+def test_fragment_merge_with_doubled_letters():
+    """Regression: 'thi rrty' fragments must merge+collapse to 'thirty'."""
+    result = solve_challenge(
+        "A] lO b-StEr'S^ ClA w- FoR cE I s ThI rrTy S iX] NeW tO ns~ "
+        "AnD| In C rEa S eS/ By TwE lV e< NeW tO ns, WhA tS ] To TaL?"
+    )
+    assert result == "48.00"

@@ -142,8 +142,10 @@ def deobfuscate(text: str) -> str:
     letters, and mixes case. We strip everything except letters, digits,
     spaces, and periods, then normalize whitespace and lowercase.
     """
-    # Keep only letters, digits, whitespace, and decimal points
+    # Keep only letters, digits, whitespace, and decimal points between digits
     cleaned = re.sub(r"[^a-zA-Z0-9\s.]", "", text)
+    # Remove periods that aren't between digits (e.g. "lo.bs" → "lobs")
+    cleaned = re.sub(r"(?<!\d)\.|\.(?!\d)", "", cleaned)
     # Collapse multiple spaces
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned.lower()
@@ -183,6 +185,7 @@ def _merge_fragments(text: str) -> str:
         | set(_OP_LOOKUP)
         | set(_IMPLICIT_OPS)
         | set(_FRACTIONS)
+        | set(_CONTEXT_OPS)
     )
     words = text.split()
     merged: list[str] = []
@@ -195,6 +198,14 @@ def _merge_fragments(text: str) -> str:
                 candidate = "".join(words[i : i + span])
                 if candidate in all_known:
                     merged.append(candidate)
+                    i += span
+                    found = True
+                    break
+                # Also try collapsed form (handles doubled letters in fragments)
+                collapsed = _collapse_runs(candidate)
+                canonical = _COLLAPSED_LOOKUP.get(collapsed)
+                if canonical:
+                    merged.append(canonical)
                     i += span
                     found = True
                     break
@@ -360,8 +371,8 @@ def solve_challenge(challenge: str) -> str | None:
     logger.info("Raw challenge: %r", challenge)
 
     cleaned = deobfuscate(challenge)
-    cleaned = _deduplicate_words(cleaned)
     cleaned = _merge_fragments(cleaned)
+    cleaned = _deduplicate_words(cleaned)
     logger.info("Deobfuscated: %r", cleaned)
 
     numbers, operations = _parse_expression(cleaned)
