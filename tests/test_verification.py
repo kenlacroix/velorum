@@ -160,3 +160,30 @@ def test_total_context():
         "what is their total force"
     )
     assert result == "64.00"
+
+
+# --- Letter-doubling obfuscation ---
+
+
+def test_doubled_letters_addition():
+    """Real challenge from Moltbook that doubles letters within words."""
+    result = solve_challenge(
+        "A] lOoBbSsTtEeR] sW^iMmSs[ aT/ fOoUrRtEeEn{ cEeMmEeNtStErS] pEr/ "
+        "sEeCcOnDd| bUt~ aNnTeNnAa] bOoOsT] aDdSs/ tHhHrEe, wHaT'S< nEw- sPpEeEeD?"
+    )
+    assert result == "17.00"
+
+
+def test_doubled_letters_total():
+    """Real challenge with letter doubling and 'total' context word."""
+    result = solve_challenge(
+        "A] lOoOoB-StEr ClAw ExErTs TwEnTy ThReE NeWtOnS ~ anD "
+        "{aNoThEr} lOoobssstEr ClAw ExErTs FiVe NeWtOnS - WhAt Is ToTaL FoRcE?"
+    )
+    assert result == "28.00"
+
+
+def test_heavily_doubled():
+    """Synthetic test with extreme letter doubling."""
+    result = solve_challenge("ffiisshh hhaass ttwweennttyy aanndd aaddddss ffiivvee")
+    assert result == "25.00"

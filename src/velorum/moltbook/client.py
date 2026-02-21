@@ -528,11 +528,24 @@ class MoltbookClient:
     async def submit_verification(
         self, verification_code: str, answer: str
     ) -> dict[str, Any]:
+        logger.info("Submitting verification answer: %s", answer)
         resp = await self._request(
             "POST",
             "/verify",
             json={"verification_code": verification_code, "answer": answer},
         )
+        # Don't raise on 400 — return the error body so callers can
+        # distinguish wrong-answer from network/auth failures.
+        if resp.status_code == 400:
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"error": resp.text[:300]}
+            logger.error(
+                "Verification rejected (400): answer=%s, response=%s",
+                answer, data,
+            )
+            return data
         resp.raise_for_status()
         return resp.json()
 

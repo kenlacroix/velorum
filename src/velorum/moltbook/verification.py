@@ -114,6 +114,27 @@ _SKIP_WORDS = frozenset({
 })
 
 
+def _collapse_runs(s: str) -> str:
+    """Collapse consecutive duplicate characters to one: 'thhhree' → 'thre'."""
+    return re.sub(r"(.)\1+", r"\1", s)
+
+
+# Build a reverse lookup: collapsed form → original known word.
+# Used to recover words garbled by letter-doubling obfuscation.
+_COLLAPSED_LOOKUP: dict[str, str] = {}
+for _word in (
+    list(WORD_NUMBERS)
+    + list(_OP_LOOKUP)
+    + list(_IMPLICIT_OPS)
+    + list(_FRACTIONS)
+    + list(_CONTEXT_OPS)
+):
+    _key = _collapse_runs(_word)
+    # First registered word wins (avoids overwriting by synonyms)
+    if _key not in _COLLAPSED_LOOKUP:
+        _COLLAPSED_LOOKUP[_key] = _word
+
+
 def deobfuscate(text: str) -> str:
     """Strip obfuscation characters from Moltbook challenge text.
 
@@ -126,6 +147,28 @@ def deobfuscate(text: str) -> str:
     # Collapse multiple spaces
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned.lower()
+
+
+def _deduplicate_words(text: str) -> str:
+    """Recover words garbled by letter-doubling obfuscation.
+
+    Moltbook sometimes doubles or triples each letter in a word:
+    "lOoBbSsTtEeR" → "loobbsstteer" → should be "lobster".
+
+    For each token, collapse consecutive duplicate characters and check
+    if the collapsed form matches a known word (number, operation, etc.).
+    If so, replace with the canonical word.
+    """
+    words = text.split()
+    result: list[str] = []
+    for word in words:
+        collapsed = _collapse_runs(word)
+        canonical = _COLLAPSED_LOOKUP.get(collapsed)
+        if canonical:
+            result.append(canonical)
+        else:
+            result.append(word)
+    return " ".join(result)
 
 
 def _merge_fragments(text: str) -> str:
@@ -317,6 +360,7 @@ def solve_challenge(challenge: str) -> str | None:
     logger.info("Raw challenge: %r", challenge)
 
     cleaned = deobfuscate(challenge)
+    cleaned = _deduplicate_words(cleaned)
     cleaned = _merge_fragments(cleaned)
     logger.info("Deobfuscated: %r", cleaned)
 
