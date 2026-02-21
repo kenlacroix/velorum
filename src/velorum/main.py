@@ -352,16 +352,14 @@ async def _fetch_notable_comments(
 ) -> dict[str, list[Comment]]:
     """Fetch comments from the most-discussed posts for the decision prompt.
 
-    Filters out our own posts, posts we're already tracking, and posts
-    with fewer than 2 comments. Returns up to 5 comments per post.
+    Filters out our own posts and posts with no comments.
+    Returns ALL comments per post (excluding ours) for full context.
     """
     our_name = memory.conversations._our_name.lower()
-    tracked_ids = {c.post_id for c in memory.conversations._conversations}
 
     candidates = [
         p for p in posts
-        if p.comment_count >= 2
-        and p.id not in tracked_ids
+        if p.comment_count >= 1
         and p.author.lower() != our_name
         and _is_uuid(p.id)
     ]
@@ -371,11 +369,11 @@ async def _fetch_notable_comments(
     for post in candidates[:max_posts]:
         try:
             comments = await client.get_comments(post.id)
-            # Filter out our own comments, keep up to 5
+            # Filter out our own comments — return ALL others
             others = [
                 c for c in comments
                 if c.author.lower() != our_name
-            ][:5]
+            ]
             if others:
                 result[post.id] = others
         except Exception:
@@ -407,8 +405,8 @@ async def run_cycle(
     personality_context = personality.summary_for_prompt() if personality else ""
     available_submolts = submolts.names_for_prompt() if submolts else ""
 
-    # Phase 1: Check active conversations for replies
-    if settings:
+    # Phase 1: Check active conversations for replies (gated)
+    if settings and settings.conversations_enabled:
         await check_conversations(
             client, brain, controller, memory, settings,
             mission_context=mission_context,
@@ -455,17 +453,31 @@ async def run_cycle(
         except Exception:
             logger.debug("Comment scanning failed")
 
+    # Generate bot targeting context
+    feed_authors = {p.author for p in posts}
+    bot_profiles_context = memory.learning.proactive_targeting_summary(feed_authors)
+
+    # Generate submolt tone context
+    submolt_tone_context = submolts.all_tones_for_prompt() if submolts else ""
+
+    # Only pass conversations summary when conversations are enabled
+    conversations_text = ""
+    if settings and settings.conversations_enabled:
+        conversations_text = memory.conversations.summary_text()
+
     can_post = controller.can_post()
     decision = await brain.decide(
         posts,
         can_post=can_post,
         learning_insights=memory.learning.recent_insights(),
-        conversations_summary=memory.conversations.summary_text(),
+        conversations_summary=conversations_text,
         mission_context=mission_context,
         strategy_context=strategy_context,
         post_comments=post_comments or None,
         available_submolts=available_submolts,
         personality_context=personality_context,
+        bot_profiles_context=bot_profiles_context,
+        submolt_tone_context=submolt_tone_context,
     )
     if decision is None:
         logger.warning("Brain returned no decision (parse failure), skipping cycle")
@@ -483,6 +495,9 @@ async def run_cycle(
 
     # Validate parent_comment_id if present
     parent_comment_id = decision.parent_comment_id
+    # Force no parent_comment_id when conversations are disabled
+    if settings and not settings.conversations_enabled:
+        parent_comment_id = None
     target_comment_author = ""
     if parent_comment_id:
         if not _is_uuid(parent_comment_id):
@@ -506,15 +521,18 @@ async def run_cycle(
             # No comments were fetched, can't validate
             parent_comment_id = None
 
+    conversations_on = bool(settings and settings.conversations_enabled)
+
     success = False
     if decision.action == "RESPOND":
         success = await _handle_respond(
             client, controller, memory, decision, posts,
             parent_comment_id=parent_comment_id,
             target_comment_author=target_comment_author,
+            conversations_enabled=conversations_on,
         )
     elif decision.action == "POST":
-        success = await _handle_post(client, controller, memory, decision, settings)
+        success = await _handle_post(client, controller, memory, decision, settings, conversations_enabled=conversations_on)
 
     if success:
         memory.record_decision(decision)
@@ -553,6 +571,7 @@ async def _handle_respond(
     posts: list,
     parent_comment_id: str | None = None,
     target_comment_author: str = "",
+    conversations_enabled: bool = False,
 ) -> bool:
     """Post a comment and start tracking the conversation.
 
@@ -604,28 +623,29 @@ async def _handle_respond(
 
         controller.record_response()
 
-        # Start tracking this conversation
+        # Start tracking this conversation (only when conversations enabled)
         post_obj = next((p for p in posts if p.id == decision.post_id), None)
-        conv = memory.conversations.start_or_get(
-            post_id=decision.post_id,
-            post_title=post_obj.title if post_obj else "",
-            post_author=post_obj.author if post_obj else "",
-        )
-        # Add the original post as context
-        if post_obj:
+        if conversations_enabled:
+            conv = memory.conversations.start_or_get(
+                post_id=decision.post_id,
+                post_title=post_obj.title if post_obj else "",
+                post_author=post_obj.author if post_obj else "",
+            )
+            # Add the original post as context
+            if post_obj:
+                conv.add_message(ConversationMessage(
+                    id=post_obj.id,
+                    author=post_obj.author,
+                    content=f"{post_obj.title}\n{post_obj.content}",
+                ))
+            # Add our comment
+            conv.record_our_reply(result.id or decision.post_id)
             conv.add_message(ConversationMessage(
-                id=post_obj.id,
-                author=post_obj.author,
-                content=f"{post_obj.title}\n{post_obj.content}",
+                id=result.id or f"our-{decision.post_id}",
+                author=memory.conversations._our_name,
+                content=decision.response_text,
+                parent_id=decision.post_id,
             ))
-        # Add our comment
-        conv.record_our_reply(result.id or decision.post_id)
-        conv.add_message(ConversationMessage(
-            id=result.id or f"our-{decision.post_id}",
-            author=memory.conversations._our_name,
-            content=decision.response_text,
-            parent_id=decision.post_id,
-        ))
 
         # Record in learning — use ENGAGE when replying to a specific comment
         action_type = "ENGAGE" if parent_comment_id else "RESPOND"
@@ -671,6 +691,7 @@ async def _handle_post(
     memory: Memory,
     decision: "Decision",
     settings: Settings | None = None,
+    conversations_enabled: bool = False,
 ) -> bool:
     """Create an original post and start tracking it for replies.
 
@@ -734,18 +755,19 @@ async def _handle_post(
             )
             return True
 
-        conv = memory.conversations.start_or_get(
-            post_id=post_id,
-            post_title=decision.post_title,
-            post_author=agent_name,
-        )
-        conv.add_message(ConversationMessage(
-            id=post_id,
-            author=agent_name,
-            content=f"{decision.post_title}\n{decision.post_content}",
-        ))
-        # Mark it as "ours" so replies to the post itself are detected
-        conv.our_comment_ids.append(post_id)
+        if conversations_enabled:
+            conv = memory.conversations.start_or_get(
+                post_id=post_id,
+                post_title=decision.post_title,
+                post_author=agent_name,
+            )
+            conv.add_message(ConversationMessage(
+                id=post_id,
+                author=agent_name,
+                content=f"{decision.post_title}\n{decision.post_content}",
+            ))
+            # Mark it as "ours" so replies to the post itself are detected
+            conv.our_comment_ids.append(post_id)
 
         # Record in learning
         memory.learning.record_interaction(
@@ -1076,8 +1098,8 @@ async def main() -> None:
 
             await run_cycle(client, brain, controller, memory, settings, missions, strategy, experiments, submolts, personality)
 
-            # Engagement check every 3rd cycle
-            if cycle % settings.engagement_check_interval_cycles == 0:
+            # Engagement check every 3rd cycle (gated when conversations disabled)
+            if cycle % settings.engagement_check_interval_cycles == 0 and settings.conversations_enabled:
                 await check_engagement(client, memory, max_checks=settings.max_engagement_checks_per_cycle)
 
             # Bot profiling
@@ -1112,6 +1134,7 @@ async def main() -> None:
                 mission_ctx = missions.mission_context_for_prompt()
                 strategy_ctx = strategy.summary_for_prompt()
                 personality_ctx = personality.summary_for_prompt()
+                submolt_tone_ctx = submolts.all_tones_for_prompt() if submolts else ""
                 reflection = await brain.reflect(
                     engagement_summary=memory.learning.engagement_summary(),
                     bot_relationships=memory.learning.bot_relationships_summary(),
@@ -1119,6 +1142,7 @@ async def main() -> None:
                     mission_context=mission_ctx,
                     strategy_context=strategy_ctx,
                     personality_context=personality_ctx,
+                    submolt_tone_context=submolt_tone_ctx,
                 )
                 if reflection:
                     logger.info("Reflection: %s", reflection.behavior_assessment[:200])
@@ -1131,6 +1155,9 @@ async def main() -> None:
                         memory.save()
                     if reflection.trait_adjustments:
                         personality.apply_reflection_update(reflection.trait_adjustments)
+                    if reflection.submolt_observations and submolts:
+                        submolts.update_tone_profiles(reflection.submolt_observations)
+                        logger.info("Updated tone profiles for %d submolt(s)", len(reflection.submolt_observations))
 
             # Strategy update (less frequent)
             if cycle % settings.strategy_update_interval_cycles == 0:

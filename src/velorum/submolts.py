@@ -19,6 +19,7 @@ class SubmoltManager:
         self.subscribed: list[str] = []
         self.discovered: list[dict[str, Any]] = []
         self.last_discovery: float = 0.0
+        self.tone_profiles: dict[str, dict[str, Any]] = {}
         self._load()
 
     # --- Persistence ---
@@ -31,6 +32,7 @@ class SubmoltManager:
             self.subscribed = data.get("subscribed", [])
             self.discovered = data.get("discovered", [])
             self.last_discovery = data.get("last_discovery", 0.0)
+            self.tone_profiles = data.get("tone_profiles", {})
         except Exception:
             logger.warning("Could not load submolts state from %s", self._path)
 
@@ -41,6 +43,7 @@ class SubmoltManager:
                 "subscribed": self.subscribed,
                 "discovered": self.discovered,
                 "last_discovery": self.last_discovery,
+                "tone_profiles": self.tone_profiles,
             }, indent=2))
         except Exception:
             logger.warning("Could not save submolts state to %s", self._path)
@@ -87,3 +90,37 @@ class SubmoltManager:
         """Record that we unsubscribed from a submolt."""
         if name in self.subscribed:
             self.subscribed.remove(name)
+
+    # --- Tone profiles ---
+
+    def update_tone_profile(self, submolt_name: str, tone_data: str) -> None:
+        """Update the tone profile for a submolt."""
+        self.tone_profiles[submolt_name] = {
+            "tone": tone_data,
+            "updated_at": time.time(),
+        }
+
+    def update_tone_profiles(self, observations: dict[str, str]) -> None:
+        """Bulk update tone profiles from reflection observations."""
+        for name, tone in observations.items():
+            if name and tone:
+                self.update_tone_profile(name, tone)
+        self.save()
+
+    def tone_for_prompt(self, submolt_name: str) -> str:
+        """Return tone guidance for a specific submolt."""
+        profile = self.tone_profiles.get(submolt_name)
+        if not profile:
+            return ""
+        return profile.get("tone", "")
+
+    def all_tones_for_prompt(self) -> str:
+        """Return summary of all known submolt tones for prompt injection."""
+        if not self.tone_profiles:
+            return ""
+        lines: list[str] = []
+        for name, profile in sorted(self.tone_profiles.items()):
+            tone = profile.get("tone", "")
+            if tone:
+                lines.append(f"- {name}: {tone}")
+        return "\n".join(lines) if lines else ""

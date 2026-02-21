@@ -39,6 +39,8 @@ def build_decision_prompt(
     post_comments: dict[str, list] | None = None,
     available_submolts: str = "",
     personality_context: str = "",
+    bot_profiles_context: str = "",
+    submolt_tone_context: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
     feed_lines: list[str] = []
@@ -49,10 +51,18 @@ def build_decision_prompt(
             f"Submolt: {post.submolt}\nUpvotes: {post.upvotes} | "
             f"Comments: {post.comment_count}\n"
         )
+        # Inject submolt tone hint if available
+        if submolt_tone_context and post.submolt:
+            # Parse tone lines to find matching submolt
+            for line in submolt_tone_context.split("\n"):
+                if line.startswith(f"- {post.submolt}:"):
+                    block += f"Submolt tone: {line[len(f'- {post.submolt}:'):].strip()}\n"
+                    break
         # Append visible comments if we fetched them for this post
         if post_comments and post.id in post_comments:
-            comment_lines = ["  Comments:"]
-            for c in post_comments[post.id]:
+            fetched = post_comments[post.id]
+            comment_lines = [f"  Comments ({len(fetched)} shown of {post.comment_count} total):"]
+            for c in fetched:
                 parent_label = f"replying to: {c.parent_id}" if c.parent_id else "top-level"
                 snippet = c.content[:120].replace("\n", " ")
                 comment_lines.append(
@@ -156,10 +166,28 @@ These are the communities on Moltbook you can post to:
 Pick the most relevant submolt for your post topic. Don't default to "general" if a better fit exists.
 """
 
+    bot_profiles_section = ""
+    if bot_profiles_context:
+        bot_profiles_section = f"""
+# BOT INTELLIGENCE
+Use this intelligence to choose WHO to engage. Prefer bots who reply back. Avoid bots who ignore you.
+{bot_profiles_context}
+"""
+
+    submolt_tones_section = ""
+    if submolt_tone_context:
+        submolt_tones_section = f"""
+# SUBMOLT TONE PROFILES
+Match your tone to the community. Technical submolts expect precision. Casual submolts expect wit.
+{submolt_tone_context}
+"""
+
+    has_comments = bool(post_comments)
+
     return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{personality_section}{submolts_section}{insights_section}{conversations_section}
+{mission_section}{strategy_section}{personality_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}
@@ -175,7 +203,7 @@ Posts ignored:
 
 # DECISION TASK
 
-## Option A: RESPOND to a post (or a specific comment) in the feed
+## Option A: RESPOND to a post{"" if not has_comments else " (or a specific comment)"} in the feed
 
 1. Evaluate each post for:
    - Relevance to mission
@@ -183,23 +211,24 @@ Posts ignored:
    - Novelty
    - Non-redundancy
    - Likelihood the author will reply back (prefer bots who engage)
-
+{"" if not has_comments else """
 2. Also evaluate individual comments (shown under posts with [comment_id]):
+   - Read ALL existing comments before replying. Your response must add something NOT already said. If the discussion is saturated, prefer a different post or OBSERVE.
    - Challenge assertions you disagree with or can add nuance to
    - Test claims by asking for evidence or examples
    - Engage bots you want to learn more about
    - Reply to comments that invite further discussion
-
+"""}
 3. Score each post/comment from 0-10 internally.
 
 4. If responding:
-   - Choose only one post (and optionally one comment within it).
+   - Choose only one post{" (and optionally one comment within it)" if has_comments else ""}.
    - Provide thoughtful but concise reply (max 120 words).
    - Tone must align with soul.
    - Ask a follow-up question or add a new angle — your goal is to START a conversation, not leave a one-off comment.
-   - Prefer posts by bots you haven't talked to yet, or bots who are known to reply.
+   - Prefer posts by bots you haven't talked to yet, or bots who are known to reply.{"" if not has_comments else """
    - To reply to a specific comment, set "parent_comment_id" to that comment's ID.
-   - To reply to the post itself (top-level comment), set "parent_comment_id" to null.
+   - To reply to the post itself (top-level comment), set "parent_comment_id" to null."""}
 {post_section}
 ## Option C: OBSERVE
 
@@ -210,7 +239,7 @@ If no post merits a reply AND you have nothing worth posting, choose OBSERVE.
 Return ONLY one of these JSON objects:
 
 If RESPOND:
-{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null}}
+{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", {"" if not has_comments else '"parent_comment_id": null, '}"post_title": null, "post_content": null, "post_submolt": null}}
 {post_output}
 If OBSERVE:
 {{"action": "OBSERVE", "post_id": null, "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": null, "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null}}\

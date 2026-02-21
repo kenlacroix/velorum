@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     min_post_interval_seconds: int = 1800  # 30 minutes between posts
     posting_enabled: bool = True
 
+    # Conversations — reply threading (feature gate)
+    conversations_enabled: bool = False
+
     # Conversations — reply threading
     max_thread_depth: int = 3
     reply_cooldown_seconds: int = 120

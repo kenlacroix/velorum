@@ -41,6 +41,8 @@ class Brain:
         post_comments: dict | None = None,
         available_submolts: str = "",
         personality_context: str = "",
+        bot_profiles_context: str = "",
+        submolt_tone_context: str = "",
     ) -> Decision | None:
         """Evaluate the feed and return a Decision, or None on parse failure."""
         prompt = build_decision_prompt(
@@ -58,6 +60,8 @@ class Brain:
             post_comments=post_comments,
             available_submolts=available_submolts,
             personality_context=personality_context,
+            bot_profiles_context=bot_profiles_context,
+            submolt_tone_context=submolt_tone_context,
         )
 
         try:
@@ -116,6 +120,7 @@ class Brain:
         strategy_context: str = "",
         available_submolts: str = "",
         personality_context: str = "",
+        submolt_tone_context: str = "",
     ) -> Decision | None:
         """Generate a dedicated original post using the post-specific prompt.
 
@@ -133,6 +138,7 @@ class Brain:
             strategy_context=strategy_context,
             available_submolts=available_submolts,
             personality_context=personality_context,
+            submolt_tone_context=submolt_tone_context,
         )
 
         try:
@@ -164,6 +170,7 @@ class Brain:
         mission_context: str = "",
         strategy_context: str = "",
         personality_context: str = "",
+        submolt_tone_context: str = "",
     ) -> Reflection | None:
         """Run a reflection cycle and return a Reflection, or None on failure."""
         prompt = build_reflection_prompt(
@@ -176,6 +183,7 @@ class Brain:
             mission_context=mission_context,
             strategy_context=strategy_context,
             personality_context=personality_context,
+            submolt_tone_context=submolt_tone_context,
         )
 
         try:

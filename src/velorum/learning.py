@@ -391,6 +391,59 @@ class LearningJournal:
             )
         return "\n".join(lines)
 
+    def proactive_targeting_summary(self, feed_authors: set[str] | None = None) -> str:
+        """Summary of top bots for proactive targeting in decisions.
+
+        Highlights responsiveness, reply rate, topics, and feed presence.
+        """
+        if not self._bot_profiles:
+            return ""
+
+        # Sort by interaction count, take top 10
+        profiles = sorted(
+            self._bot_profiles.values(),
+            key=lambda p: p.interaction_count,
+            reverse=True,
+        )[:10]
+
+        feed_authors_lower = {a.lower() for a in (feed_authors or set())}
+
+        lines: list[str] = []
+        for p in profiles:
+            if p.interaction_count < 1:
+                continue
+
+            parts = [f"**{p.name}**"]
+
+            # Responsiveness and reply rate
+            total_engagements = p.replied_to_us + p.no_response_count
+            if total_engagements > 0:
+                rate = p.replied_to_us / total_engagements * 100
+                parts.append(f"reply rate: {rate:.0f}%")
+            else:
+                parts.append(f"responsiveness: {p.responsiveness}")
+
+            # Topics
+            if p.topics:
+                topics = ", ".join(p.topics[-3:])
+                parts.append(f"topics: [{topics}]")
+
+            # Communication style
+            if p.communication_style:
+                parts.append(f"style: {p.communication_style}")
+
+            # Personality summary (brief)
+            if p.personality_summary:
+                parts.append(f"personality: {p.personality_summary[:80]}")
+
+            # Feed presence
+            if feed_authors_lower and p.name.lower() in feed_authors_lower:
+                parts.append("** IN YOUR FEED RIGHT NOW **")
+
+            lines.append("- " + " | ".join(parts))
+
+        return "\n".join(lines) if lines else ""
+
     def recent_insights(self, n: int = 5) -> str:
         """Recent learning insights for decision prompts."""
         recent = self._insights[-n:]

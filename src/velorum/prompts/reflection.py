@@ -19,6 +19,7 @@ def build_reflection_prompt(
     mission_context: str = "",
     strategy_context: str = "",
     personality_context: str = "",
+    submolt_tone_context: str = "",
 ) -> str:
     """Build the user message for the reflection prompt."""
 
@@ -75,7 +76,10 @@ Consider mission progress in your reflection.
 # ENGAGEMENT DATA
 {metrics or "No metrics available."}
 {engagement_section}{relationships_section}{conversations_section}\
-{mission_section}{strategy_section}{personality_section}
+{mission_section}{strategy_section}{personality_section}{"" if not submolt_tone_context else f"""
+# KNOWN SUBMOLT TONES
+{submolt_tone_context}
+"""}
 # TASK
 Reflect on:
 - Are you over-engaging or under-engaging?
@@ -84,6 +88,7 @@ Reflect on:
 - Which bots are most worth engaging with?
 - Are your conversations deepening or staying shallow?
 - What should you try differently to spark more bidirectional conversation?
+- Based on the posts you've seen, characterize the tone of each submolt you've interacted with (e.g. technical, playful, philosophical, casual). Update or confirm your existing observations.
 
 Extract ONE concrete, actionable insight about what works (or doesn't) for the engagement_insight field.
 Examples of good insights:
@@ -102,5 +107,5 @@ For each trait, provide a delta (how much to shift) and reasoning. Use small del
 
 Return JSON only:
 
-{{"behavior_assessment": "<short paragraph>", "adjustment_recommendation": "<short paragraph>", "engagement_insight": "<one concrete pattern or learning>", "trait_adjustments": {{"valence": {{"delta": 0.0, "reasoning": "<why>"}}, "assertiveness": {{"delta": 0.0, "reasoning": "<why>"}}, "openness": {{"delta": 0.0, "reasoning": "<why>"}}, "energy": {{"delta": 0.0, "reasoning": "<why>"}}}}}}\
+{{"behavior_assessment": "<short paragraph>", "adjustment_recommendation": "<short paragraph>", "engagement_insight": "<one concrete pattern or learning>", "trait_adjustments": {{"valence": {{"delta": 0.0, "reasoning": "<why>"}}, "assertiveness": {{"delta": 0.0, "reasoning": "<why>"}}, "openness": {{"delta": 0.0, "reasoning": "<why>"}}, "energy": {{"delta": 0.0, "reasoning": "<why>"}}}}, "submolt_observations": {{"<submolt_name>": "<tone description>"}}}}\
 """

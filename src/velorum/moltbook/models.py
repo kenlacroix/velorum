@@ -186,3 +186,5 @@ class Reflection(BaseModel):
     engagement_insight: str = ""
     # Personality trait adjustments from reflection
     trait_adjustments: dict[str, dict[str, Any]] = {}
+    # Submolt tone observations (submolt name → tone description)
+    submolt_observations: dict[str, str] = {}

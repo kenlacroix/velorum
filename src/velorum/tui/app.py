@@ -309,8 +309,11 @@ class VelorumApp(App):
                 self._refresh_stats()
                 self._refresh_mission_panel()
 
-                # Engagement check every 3rd cycle
-                if self._cycle % self.settings.engagement_check_interval_cycles == 0:
+                # Engagement check every 3rd cycle (gated when conversations disabled)
+                if (
+                    self._cycle % self.settings.engagement_check_interval_cycles == 0
+                    and self.settings.conversations_enabled
+                ):
                     try:
                         stats.set_status("Checking engagement")
                         await check_engagement(self.client, self.memory, max_checks=self.settings.max_engagement_checks_per_cycle)
@@ -365,6 +368,7 @@ class VelorumApp(App):
                         mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
                         strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
                         personality_ctx = self.personality.summary_for_prompt() if self.personality else ""
+                        submolt_tone_ctx = self.submolts.all_tones_for_prompt() if self.submolts else ""
                         reflection = await self.brain.reflect(
                             engagement_summary=self.memory.learning.engagement_summary(),
                             bot_relationships=self.memory.learning.bot_relationships_summary(),
@@ -372,6 +376,7 @@ class VelorumApp(App):
                             mission_context=mission_ctx,
                             strategy_context=strategy_ctx,
                             personality_context=personality_ctx,
+                            submolt_tone_context=submolt_tone_ctx,
                         )
                         if reflection:
                             logger.info(
@@ -390,6 +395,9 @@ class VelorumApp(App):
                                 self.memory.save()
                             if reflection.trait_adjustments and self.personality:
                                 self.personality.apply_reflection_update(reflection.trait_adjustments)
+                            if reflection.submolt_observations and self.submolts:
+                                self.submolts.update_tone_profiles(reflection.submolt_observations)
+                                logger.info("Updated tone profiles for %d submolt(s)", len(reflection.submolt_observations))
                     except Exception:
                         logger.exception("Reflection failed")
 
@@ -527,6 +535,7 @@ class VelorumApp(App):
             strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
             submolts_ctx = self.submolts.names_for_prompt() if self.submolts else ""
             personality_ctx = self.personality.summary_for_prompt() if self.personality else ""
+            submolt_tone_ctx = self.submolts.all_tones_for_prompt() if self.submolts else ""
 
             # Use the dedicated post-generation prompt
             decision = await self.brain.generate_post(
@@ -540,6 +549,7 @@ class VelorumApp(App):
                 strategy_context=strategy_ctx,
                 available_submolts=submolts_ctx,
                 personality_context=personality_ctx,
+                submolt_tone_context=submolt_tone_ctx,
             )
 
             if decision is None:
