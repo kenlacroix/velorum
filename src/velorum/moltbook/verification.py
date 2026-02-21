@@ -27,19 +27,73 @@ WORD_NUMBERS: dict[str, float] = {
     "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
 }
 
+# Fraction words — "a third" = 1/3, "a quarter" = 1/4, etc.
+_FRACTIONS: dict[str, float] = {
+    "half": 0.5,
+    "third": 1.0 / 3.0,
+    "quarter": 0.25,
+    "fourth": 0.25,
+    "fifth": 0.2,
+    "sixth": 1.0 / 6.0,
+    "seventh": 1.0 / 7.0,
+    "eighth": 0.125,
+    "ninth": 1.0 / 9.0,
+    "tenth": 0.1,
+}
+
 # Per-word operation lookup (maps word → operation name)
 _OP_LOOKUP: dict[str, str] = {}
 for _w in ("adds", "add", "added", "plus", "gains", "gained",
-           "increases", "increased", "grows", "grew", "speeds", "sped"):
+           "increases", "increased", "grows", "grew", "speeds", "sped",
+           "earns", "earned", "receives", "received", "collects", "collected",
+           "finds", "found", "gets", "got", "rises", "rose",
+           "climbs", "climbed", "jumps", "jumped", "accelerates", "accelerated"):
     _OP_LOOKUP[_w] = "add"
 for _w in ("subtracts", "subtract", "subtracted", "minus",
            "loses", "lost", "decreases", "decreased",
-           "slows", "slowed", "drops", "dropped"):
+           "slows", "slowed", "drops", "dropped",
+           "spends", "spent", "removes", "removed",
+           "uses", "used", "consumes", "consumed",
+           "gives", "gave", "falls", "fell",
+           "shrinks", "shrunk", "reduces", "reduced",
+           "decelerates", "decelerated", "surrenders", "surrendered",
+           "donates", "donated", "discards", "discarded",
+           "eats", "ate", "burns", "burned", "burnt"):
     _OP_LOOKUP[_w] = "subtract"
 for _w in ("multiplies", "multiplied", "multiply", "times", "product"):
     _OP_LOOKUP[_w] = "multiply"
 for _w in ("divides", "divided", "divide", "splits", "split"):
     _OP_LOOKUP[_w] = "divide"
+
+# Two-word operation phrases (checked before single-word ops)
+_TWO_WORD_OPS: dict[str, str] = {
+    "takes away": "subtract",
+    "took away": "subtract",
+    "gives away": "subtract",
+    "gave away": "subtract",
+    "goes up": "add",
+    "went up": "add",
+    "goes down": "subtract",
+    "went down": "subtract",
+    "picks up": "add",
+    "picked up": "add",
+    "puts down": "subtract",
+    "put down": "subtract",
+    "cut by": "subtract",
+    "less than": "subtract",
+}
+
+# Single-word context hints that imply an operation between two numbers
+# when no explicit operation word is present. Applied to the question
+# at the end of the challenge to override the "add" fallback.
+_CONTEXT_OPS: dict[str, str] = {
+    "difference": "subtract",
+    "total": "add",
+    "combined": "add",
+    "sum": "add",
+    "together": "add",
+    "remaining": "subtract",
+}
 
 # Implicit operation + operand (no separate number follows)
 _IMPLICIT_OPS: dict[str, tuple[str, float]] = {
@@ -81,7 +135,12 @@ def _merge_fragments(text: str) -> str:
     a space (after stripping special chars). Try merging adjacent tokens
     to reconstruct known number and operation words.
     """
-    all_known = set(WORD_NUMBERS) | set(_OP_LOOKUP) | set(_IMPLICIT_OPS)
+    all_known = (
+        set(WORD_NUMBERS)
+        | set(_OP_LOOKUP)
+        | set(_IMPLICIT_OPS)
+        | set(_FRACTIONS)
+    )
     words = text.split()
     merged: list[str] = []
     i = 0
@@ -102,6 +161,18 @@ def _merge_fragments(text: str) -> str:
     return " ".join(merged)
 
 
+def _detect_context_op(text: str) -> str | None:
+    """Scan the full text for context words that hint at the operation.
+
+    Returns an operation name if a context word is found, else None.
+    Used as a smarter fallback than always defaulting to "add".
+    """
+    for word, op in _CONTEXT_OPS.items():
+        if word in text:
+            return op
+    return None
+
+
 def _parse_expression(text: str) -> tuple[list[float], list[str]]:
     """Parse cleaned text into a sequence of numbers and operations.
 
@@ -115,6 +186,8 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
     numbers: list[float] = []
     operations: list[str] = []
     pending_op: str | None = None
+    context_op = _detect_context_op(text)
+    fallback_op = context_op or "add"
     i = 0
 
     while i < len(words):
@@ -130,9 +203,53 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
             pending_op = None
             continue
 
-        # Operation word
+        # Two-word operation phrases ("takes away", "gives away", etc.)
+        if i + 1 < len(words):
+            two_word = f"{word} {words[i + 1].strip('.,!?;:')}"
+            if two_word in _TWO_WORD_OPS:
+                pending_op = _TWO_WORD_OPS[two_word]
+                i += 2
+                continue
+
+        # Single-word operation
         if word in _OP_LOOKUP:
             pending_op = _OP_LOOKUP[word]
+            i += 1
+            continue
+
+        # Fraction word: "a third", "a quarter", etc.
+        # When preceded by a pending subtract/divide op, apply as fraction
+        if word in _FRACTIONS:
+            frac_val = _FRACTIONS[word]
+            if numbers and pending_op:
+                # "loses a third" = multiply by fraction
+                # "slows by a third" = subtract (current * fraction)
+                # The intent is: result = current - current * fraction
+                # But we model it as: multiply by (1 - fraction) for subtract,
+                # or multiply by fraction for other ops
+                if pending_op == "subtract":
+                    # "loses a third" means lose 1/3 of current value
+                    operations.append("multiply")
+                    numbers.append(1.0 - frac_val)
+                elif pending_op == "divide":
+                    operations.append("multiply")
+                    numbers.append(frac_val)
+                elif pending_op == "add":
+                    # "gains a third" means gain 1/3 of current value
+                    operations.append("multiply")
+                    numbers.append(1.0 + frac_val)
+                else:
+                    operations.append(pending_op)
+                    numbers.append(frac_val)
+            elif numbers:
+                # No pending op — use context fallback
+                if fallback_op == "subtract":
+                    operations.append("multiply")
+                    numbers.append(1.0 - frac_val)
+                else:
+                    operations.append("multiply")
+                    numbers.append(1.0 + frac_val)
+            pending_op = None
             i += 1
             continue
 
@@ -143,7 +260,7 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
             if numbers and pending_op:
                 operations.append(pending_op)
             elif numbers:
-                operations.append("add")  # fallback
+                operations.append(fallback_op)
             numbers.append(value)
             pending_op = None
             i += 1
@@ -171,7 +288,7 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
             if numbers and pending_op:
                 operations.append(pending_op)
             elif numbers:
-                operations.append("add")  # fallback
+                operations.append(fallback_op)
             numbers.append(value)
             pending_op = None
             i = j

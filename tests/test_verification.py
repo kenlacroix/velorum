@@ -95,3 +95,68 @@ def test_doubles_then_subtract():
 def test_obfuscated_multi_step():
     result = solve_challenge("cR^aB s|tA,rTs aT tEn, a!dDs fI;vE, sL|oWs b!Y tH;rEe")
     assert result == "12.00"
+
+
+# --- Fraction words ---
+
+
+def test_fraction_third():
+    result = solve_challenge("a whale swims at sixty and slows by a third")
+    assert result == "40.00"
+
+
+def test_fraction_quarter():
+    result = solve_challenge("a lobster has ninety and loses a quarter")
+    assert result == "67.50"
+
+
+def test_fraction_half_gain():
+    result = solve_challenge("a crab has fifty and gains a half")
+    assert result == "75.00"
+
+
+# --- Multi-word operations ---
+
+
+def test_takes_away():
+    result = solve_challenge("a crab has eighty and takes away twenty")
+    assert result == "60.00"
+
+
+def test_gives_away():
+    result = solve_challenge("a fish earns forty and gives away fifteen")
+    assert result == "25.00"
+
+
+# --- Extended operation synonyms ---
+
+
+def test_spends():
+    result = solve_challenge("a lobster has fifty and spends twenty")
+    assert result == "30.00"
+
+
+def test_removes():
+    result = solve_challenge("a crab collects thirty and removes ten")
+    assert result == "20.00"
+
+
+def test_uses():
+    result = solve_challenge("a fish finds sixty and uses forty")
+    assert result == "20.00"
+
+
+# --- Context-based operation ---
+
+
+def test_difference_context():
+    result = solve_challenge("what is the difference between fifty and thirty")
+    assert result == "20.00"
+
+
+def test_total_context():
+    result = solve_challenge(
+        "a lobsters claw force is forty newtons and the rival claw is twenty four "
+        "what is their total force"
+    )
+    assert result == "64.00"
