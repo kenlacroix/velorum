@@ -215,3 +215,21 @@ def test_fragment_merge_with_doubled_letters():
         "AnD| In C rEa S eS/ By TwE lV e< NeW tO ns, WhA tS ] To TaL?"
     )
     assert result == "48.00"
+
+
+# --- Determiner "one" not treated as number ---
+
+
+def test_one_as_determiner_not_number():
+    """Regression: 'in one' should not parse 'one' as the number 1."""
+    result = solve_challenge(
+        "a lobster claw exerts thirty one newtons in one and the other "
+        "claw exerts fourteen newtons what is total force"
+    )
+    assert result == "45.00"
+
+
+def test_one_as_actual_number():
+    """Ensure 'one' is still parsed as 1 when it IS a numeral."""
+    result = solve_challenge("a crab has twenty and adds one")
+    assert result == "21.00"

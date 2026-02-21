@@ -113,6 +113,10 @@ _SKIP_WORDS = frozenset({
     "its", "it", "is", "was", "has", "had", "more", "from", "for",
 })
 
+# Prepositions/articles that turn a following small number word into a
+# determiner rather than a numeral: "in one claw", "the other one", etc.
+_DETERMINER_PREV = frozenset({"in", "the", "another", "each", "every", "per"})
+
 
 def _collapse_runs(s: str) -> str:
     """Collapse consecutive duplicate characters to one: 'thhhree' → 'thre'."""
@@ -321,7 +325,13 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
             continue
 
         # Word number (with compound look-ahead)
+        # Skip "one" when used as a determiner ("in one claw", not the number 1)
         if word in WORD_NUMBERS:
+            if word == "one" and i > 0:
+                prev = words[i - 1].strip(".,!?;:")
+                if prev in _DETERMINER_PREV:
+                    i += 1
+                    continue
             value = WORD_NUMBERS[word]
             j = i + 1
             while j < len(words):
