@@ -34,6 +34,8 @@ class Experiment:
         engagement_metrics: dict[str, Any] | None = None,
         mission_completion_pct: float = 0.0,
         llm_postmortem: str = "",
+        start_reason: str = "",
+        auto_started: bool = False,
     ) -> None:
         self.id = id or str(uuid.uuid4())[:8]
         self.mission_prompt = mission_prompt
@@ -47,6 +49,8 @@ class Experiment:
         self.engagement_metrics = engagement_metrics or {}
         self.mission_completion_pct = mission_completion_pct
         self.llm_postmortem = llm_postmortem
+        self.start_reason = start_reason
+        self.auto_started = auto_started
 
     @property
     def duration_seconds(self) -> float:
@@ -67,6 +71,8 @@ class Experiment:
             "engagement_metrics": self.engagement_metrics,
             "mission_completion_pct": self.mission_completion_pct,
             "llm_postmortem": self.llm_postmortem,
+            "start_reason": self.start_reason,
+            "auto_started": self.auto_started,
         }
 
     @classmethod
@@ -84,6 +90,8 @@ class Experiment:
             engagement_metrics=d.get("engagement_metrics"),
             mission_completion_pct=d.get("mission_completion_pct", 0.0),
             llm_postmortem=d.get("llm_postmortem", ""),
+            start_reason=d.get("start_reason", ""),
+            auto_started=d.get("auto_started", False),
         )
 
 
@@ -108,6 +116,8 @@ class ExperimentLog:
         self,
         mission_prompt: str,
         initial_strategy: dict[str, Any] | None = None,
+        start_reason: str = "",
+        auto_started: bool = False,
     ) -> Experiment:
         """Start tracking a new experiment."""
         if self._active:
@@ -117,12 +127,23 @@ class ExperimentLog:
         exp = Experiment(
             mission_prompt=mission_prompt,
             initial_strategy=initial_strategy or {},
+            start_reason=start_reason,
+            auto_started=auto_started,
         )
         self._active = exp
         self._experiments.append(exp)
         self.save()
         logger.info("Experiment started: %s (id: %s)", mission_prompt[:60], exp.id)
         return exp
+
+    def latest_postmortem(self) -> str:
+        """Return the postmortem text of the most recently completed experiment, or ''."""
+        completed = [e for e in self._experiments if e.status == "completed" and e.llm_postmortem]
+        if not completed:
+            return ""
+        # Most recently ended
+        latest = max(completed, key=lambda e: e.ended_at)
+        return latest.llm_postmortem
 
     def end_experiment(
         self,

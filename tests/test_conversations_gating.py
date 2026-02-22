@@ -7,7 +7,9 @@ from velorum.moltbook.models import Post
 
 class TestConversationsGating:
     def test_conversations_disabled_by_default(self):
+        # Pass _env_file=None to ignore local .env so we test the true default
         settings = Settings(
+            _env_file=None,
             moltbook_api_key="test",
             moltbook_app_key="test",
             anthropic_api_key="test",
@@ -33,7 +35,7 @@ class TestDecisionPromptCommentGating:
         )
 
     def test_no_comment_instructions_without_comments(self):
-        """When no comments are passed, comment-reply instructions are excluded."""
+        """When no comments are passed, posts are labelled top-level only and no comment list appears."""
         prompt = build_decision_prompt(
             soul="Test soul",
             posts=[self._make_post()],
@@ -42,9 +44,10 @@ class TestDecisionPromptCommentGating:
             ignored_summary="",
             post_comments=None,
         )
-        # The reply-to-comment instructions should be absent
-        assert "To reply to a specific comment" not in prompt
-        assert "Read ALL existing comments" not in prompt
+        # Posts without fetched comments must be marked as top-level only
+        assert "top-level only" in prompt
+        # No comment list should appear in the feed
+        assert "Comments (1 shown" not in prompt
 
     def test_comment_instructions_with_comments(self):
         """When comments are passed, comment-reply instructions are included."""

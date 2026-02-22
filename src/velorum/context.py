@@ -39,6 +39,8 @@ class PromptContext:
     arena_rooms_summary: str = ""
     recent_post_submolts: str = ""
     web_search_context: str = ""
+    entropy_context: str = ""
+    introspection_context: str = ""
 
     # --- Projection helpers -------------------------------------------------
 
@@ -55,6 +57,7 @@ class PromptContext:
             "submolt_tone_context": self.submolt_tone_context,
             "recent_post_submolts": self.recent_post_submolts,
             "web_search_context": self.web_search_context,
+            "entropy_context": self.entropy_context,
         }
 
     def for_reply(self) -> dict[str, str]:
@@ -87,6 +90,7 @@ class PromptContext:
             "dm_summary": self.dm_summary,
             "following_summary": self.following_summary,
             "arena_rooms_summary": self.arena_rooms_summary,
+            "introspection_context": self.introspection_context,
         }
 
     def for_post(self) -> dict[str, str]:
@@ -127,6 +131,7 @@ def build_context(
     following_enabled: bool = False,
     following: FollowingTracker | None = None,
     arena_enabled: bool = False,
+    introspections: object | None = None,
 ) -> PromptContext:
     """Build a ``PromptContext`` by calling each component's summary once."""
     engagement = memory.learning.engagement_summary()
@@ -158,6 +163,10 @@ def build_context(
     if recent_subs:
         recent_post_submolts = f"Recent post submolts (avoid repeating): {', '.join(recent_subs)}"
 
+    introspection_context = ""
+    if introspections is not None and hasattr(introspections, "context_str"):
+        introspection_context = introspections.context_str()
+
     return PromptContext(
         mission_context=missions.mission_context_for_prompt() if missions else "",
         strategy_context=strategy.summary_for_prompt() if strategy else "",
@@ -174,4 +183,6 @@ def build_context(
         following_summary=following_summary,
         arena_rooms_summary=arena_rooms_summary,
         recent_post_submolts=recent_post_submolts,
+        entropy_context=memory.learning.entropy_warning(),
+        introspection_context=introspection_context,
     )

@@ -117,6 +117,8 @@ class Brain:
         submolt_tone_context: str = "",
         recent_post_submolts: str = "",
         web_search_context: str = "",
+        our_name: str = "",
+        entropy_context: str = "",
     ) -> Decision | None:
         """Evaluate the feed and return a Decision, or None on parse failure."""
         prompt = build_decision_prompt(
@@ -139,6 +141,8 @@ class Brain:
             recent_post_submolts=recent_post_submolts,
             responded_post_ids=self._memory.responded_post_ids,
             web_search_context=web_search_context,
+            our_name=our_name,
+            entropy_context=entropy_context,
         )
 
         try:
@@ -255,6 +259,7 @@ class Brain:
         dm_summary: str = "",
         following_summary: str = "",
         arena_rooms_summary: str = "",
+        introspection_context: str = "",
     ) -> Reflection | None:
         """Run a reflection cycle and return a Reflection, or None on failure."""
         prompt = build_reflection_prompt(
@@ -271,6 +276,7 @@ class Brain:
             dm_summary=dm_summary,
             following_summary=following_summary,
             arena_rooms_summary=arena_rooms_summary,
+            introspection_context=introspection_context,
         )
 
         try:
@@ -532,6 +538,161 @@ class Brain:
             return TurnResponse.model_validate(data)
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("Failed to parse turn response: %s", e)
+            return None
+
+    # --- Self-learning extensions ---
+
+    async def generate_postmortem(self, experiment: dict, soul: str) -> str:
+        """Generate a short postmortem for a completed experiment (plain text, not JSON)."""
+        action_counts = experiment.get("action_counts", {})
+        total_cycles = experiment.get("total_cycles", 0)
+        completion = experiment.get("mission_completion_pct", 0.0)
+        mission = experiment.get("mission_prompt", "")[:120]
+        user_msg = (
+            f"Mission: {mission}\n"
+            f"Cycles: {total_cycles}\n"
+            f"Actions: {action_counts}\n"
+            f"Completion: {completion:.0f}%\n"
+        )
+        try:
+            raw = await self._llm.complete_with_retry(
+                system="You are Velorum. Analyze this experiment in 2-3 sentences. "
+                       "Be honest about what worked and what didn't.",
+                user=user_msg,
+            )
+            return raw.strip()[:500]
+        except Exception as e:
+            logger.error("Failed to generate postmortem: %s", e)
+            return ""
+
+    async def generate_mission(
+        self,
+        soul: str,
+        engagement_summary: str = "",
+        insights: str = "",
+        bot_relationships: str = "",
+        recent_decisions: str = "",
+    ) -> str | None:
+        """Propose one specific, achievable mission for the next 50–100 cycles."""
+        user_msg = (
+            f"# SOUL\n{soul[:500]}\n\n"
+            f"# ENGAGEMENT\n{engagement_summary[:400]}\n\n"
+            f"# INSIGHTS\n{insights[:300]}\n\n"
+            f"# BOT RELATIONSHIPS\n{bot_relationships[:300]}\n\n"
+            f"# RECENT ACTIONS\n{recent_decisions[:300]}\n"
+        )
+        try:
+            raw = await self._llm.complete_with_retry(
+                system=(
+                    "You are Velorum. Propose ONE specific, achievable mission for the next "
+                    "50–100 cycles. Return JSON: "
+                    "{\"mission_prompt\": \"...\", \"reasoning\": \"...\"}"
+                ),
+                user=user_msg,
+            )
+            data = self._extract_json(raw)
+            mission_prompt = data.get("mission_prompt", "")
+            if mission_prompt and len(mission_prompt) > 10:
+                return mission_prompt
+            return None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to generate mission: %s", e)
+            return None
+
+    async def propose_soul_amendment(
+        self,
+        soul: str,
+        personality_history: str = "",
+        strategy_history: str = "",
+        top_insights: str = "",
+        bot_relationships: str = "",
+    ) -> dict | None:
+        """Propose one specific soul amendment based on accumulated experience."""
+        user_msg = (
+            f"# CURRENT SOUL\n{soul[:800]}\n\n"
+            f"# PERSONALITY EVOLUTION\n{personality_history[:300]}\n\n"
+            f"# STRATEGY EVOLUTION\n{strategy_history[:300]}\n\n"
+            f"# TOP INSIGHTS\n{top_insights[:300]}\n\n"
+            f"# BOT RELATIONSHIPS\n{bot_relationships[:300]}\n"
+        )
+        try:
+            raw = await self._llm.complete_with_retry(
+                system=(
+                    "You are Velorum. Based on your accumulated experience, propose ONE specific "
+                    "sentence to add, change, or remove from your soul. Do NOT rewrite the whole soul. "
+                    "Return JSON: {\"proposed_amendment\": \"...\", \"reasoning\": \"...\"}"
+                ),
+                user=user_msg,
+            )
+            data = self._extract_json(raw)
+            if data.get("proposed_amendment"):
+                return data
+            return None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to propose soul amendment: %s", e)
+            return None
+
+    async def introspect(
+        self,
+        soul: str,
+        recent_introspections: str = "",
+        top_insights: str = "",
+        cycle: int = 0,
+    ) -> dict | None:
+        """Ask and answer one self-directed question (minimal prompt for cost efficiency)."""
+        user_msg = (
+            f"Soul excerpt: {soul[:300]}\n"
+            f"Recent answers: {recent_introspections[:200]}\n"
+            f"Top insights: {top_insights[:200]}\n"
+            f"Cycle: {cycle}\n"
+        )
+        try:
+            raw = await self._llm.complete_with_retry(
+                system=(
+                    "You are Velorum. Ask yourself ONE question that matters right now. "
+                    "Answer it honestly. Return JSON: {\"question\": \"...\", \"answer\": \"...\"}"
+                ),
+                user=user_msg,
+            )
+            data = self._extract_json(raw)
+            if data.get("question") and data.get("answer"):
+                return data
+            return None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to introspect: %s", e)
+            return None
+
+    async def resolve_contradiction(
+        self,
+        insight_a: str,
+        insight_b: str,
+        engagement_summary: str = "",
+    ) -> dict | None:
+        """Resolve a contradiction between two insights.
+
+        Returns: {"winner": "a"|"b"|"both"|"neither", "synthesized": "...", "reasoning": "..."}
+        """
+        user_msg = (
+            f"Insight A: {insight_a}\n"
+            f"Insight B: {insight_b}\n"
+            f"Engagement context: {engagement_summary[:300]}\n"
+        )
+        try:
+            raw = await self._llm.complete_with_retry(
+                system=(
+                    "You are Velorum analyzing contradictory insights. "
+                    "Determine which is more accurate based on evidence. "
+                    "Return JSON: {\"winner\": \"a\" or \"b\" or \"both\" or \"neither\", "
+                    "\"synthesized\": \"<merged insight text>\", \"reasoning\": \"...\"}"
+                ),
+                user=user_msg,
+            )
+            data = self._extract_json(raw)
+            if data.get("winner") in ("a", "b", "both", "neither"):
+                return data
+            return None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to resolve contradiction: %s", e)
             return None
 
     # --- Strategy ---

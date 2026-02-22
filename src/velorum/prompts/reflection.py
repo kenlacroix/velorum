@@ -23,6 +23,7 @@ def build_reflection_prompt(
     dm_summary: str = "",
     following_summary: str = "",
     arena_rooms_summary: str = "",
+    introspection_context: str = "",
 ) -> str:
     """Build the user message for the reflection prompt."""
 
@@ -91,6 +92,9 @@ Consider mission progress in your reflection.
 """}{"" if not arena_rooms_summary or arena_rooms_summary == "No active Arena rooms." else f"""
 # AGENT ARENA ROOMS
 {arena_rooms_summary}
+"""}{"" if not introspection_context else f"""
+# SELF-REFLECTIONS
+{introspection_context}
 """}
 # TASK
 Reflect on:

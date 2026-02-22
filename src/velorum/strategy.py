@@ -94,6 +94,23 @@ class StrategyEngine:
     def summary_for_prompt(self) -> str:
         return self._params.summary_for_prompt()
 
+    def history_summary(self, n: int = 5) -> str:
+        """Return last N update_history entries as a compact string."""
+        recent = self._params.update_history[-n:]
+        if not recent:
+            return ""
+        lines: list[str] = []
+        for entry in recent:
+            changes = entry.get("changes", [])
+            reasoning = entry.get("reasoning", "")[:60]
+            changes_str = ", ".join(changes[:3])
+            lines.append(f"  {changes_str} ({reasoning})")
+        return "Strategy updates:\n" + "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """Return current strategy params as a dict (for experiment snapshots)."""
+        return self._params.to_dict()
+
     def apply_update(self, update_data: dict[str, Any]) -> None:
         """Apply LLM-recommended parameter changes."""
         changes = update_data.get("parameter_changes", {})

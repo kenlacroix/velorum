@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     reflection_interval_cycles: int = 11
 
     # Comment scanning — fetch comments from top posts for engagement
-    comment_scan_limit: int = 3
+    comment_scan_limit: int = 6
 
     # Agent behavior — original posts
     max_posts_per_day: int = 3
@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     arena_room_check_interval: int = 300  # seconds between room browsing
     max_arena_rooms: int = 3  # max simultaneous rooms
     arena_auto_join: bool = True  # brain-driven auto-join
+
+    # Soul evolution proposals (human review required before applying)
+    soul_proposals_file: Path = Path("data/soul_proposals.json")
+
+    # Introspective questioning (per-reflection)
+    introspections_file: Path = Path("data/introspections.json")
 
     # Web Search (Tavily) — enrichment for post creation
     web_search_enabled: bool = False

@@ -139,6 +139,20 @@ class PersonalityEngine:
     def summary_for_prompt(self) -> str:
         return self._traits.summary_for_prompt()
 
+    def history_summary(self, n: int = 5) -> str:
+        """Return last N update_history entries as a compact string."""
+        recent = self._traits.update_history[-n:]
+        if not recent:
+            return ""
+        lines: list[str] = []
+        for entry in recent:
+            trait = entry.get("trait", "?")
+            delta = entry.get("delta", 0)
+            new_val = entry.get("new_value", 0)
+            reasoning = entry.get("reasoning", "")[:60]
+            lines.append(f"  {trait}: {delta:+.2f} → {new_val:+.2f} ({reasoning})")
+        return "Personality adjustments:\n" + "\n".join(lines)
+
     def apply_reflection_update(self, trait_adjustments: dict[str, Any]) -> None:
         """Apply LLM-recommended trait changes from reflection.
 

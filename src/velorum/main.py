@@ -29,6 +29,7 @@ from velorum.conversations import ConversationMessage
 from velorum.dm import DMMessage
 from velorum.experiment import ExperimentLog
 from velorum.following import FollowingTracker
+from velorum.introspection import Introspection, IntrospectionLog
 from velorum.learning import infer_style_tags
 from velorum.llm.base import LLMProvider
 from velorum.memory import Memory
@@ -37,6 +38,7 @@ from velorum.moltbook.client import MoltbookClient
 from velorum.moltbook.models import Comment, Decision, Post
 from velorum.moltbook.verification import solve_challenge
 from velorum.personality import PersonalityEngine
+from velorum.soul import SoulProposal, SoulProposalLog
 from velorum.strategy import StrategyEngine
 from velorum.submolts import SubmoltManager
 
@@ -83,6 +85,8 @@ def init_components(settings: Settings) -> Components:
     submolts = SubmoltManager(persist_path=settings.submolts_file)
     personality = PersonalityEngine(persist_path=settings.personality_file)
     following = FollowingTracker(persist_path=settings.following_file)
+    soul_proposals = SoulProposalLog(persist_path=settings.soul_proposals_file)
+    introspections = IntrospectionLog(persist_path=settings.introspections_file)
 
     # Agent Arena (optional)
     arena_client = None
@@ -112,6 +116,8 @@ def init_components(settings: Settings) -> Components:
         following=following,
         arena_client=arena_client,
         arena_rooms=arena_rooms,
+        soul_proposals=soul_proposals,
+        introspections=introspections,
     )
 
 
@@ -235,6 +241,10 @@ async def check_conversations(
 
         # Find new replies to our comments
         new_replies = conv.find_new_replies_to_us(comments)
+        logger.debug(
+            "Conversation %s: %d total comments, %d our reply IDs, %d new replies",
+            conv.post_id[:12], len(comments), len(conv.our_comment_ids), len(new_replies),
+        )
         if not new_replies:
             continue
 
@@ -710,6 +720,20 @@ async def run_cycle(
         logger.info("Empty feed, skipping cycle")
         return
 
+    # Filter already-responded posts from the feed shown to the LLM.
+    # The [ALREADY RESPONDED] tag is insufficient — the LLM keeps picking
+    # the same post. Only keep fresh posts for the decision prompt.
+    fresh_posts = [p for p in posts if not memory.has_responded_to(p.id)]
+    if not fresh_posts:
+        logger.info("All %d feed posts already responded to — observing this cycle", len(posts))
+        return
+    if len(fresh_posts) < len(posts):
+        logger.debug(
+            "Filtered %d already-responded posts from feed (%d → %d)",
+            len(posts) - len(fresh_posts), len(posts), len(fresh_posts),
+        )
+    posts = fresh_posts
+
     # Fetch comments from notable posts for comment engagement
     scan_limit = settings.comment_scan_limit if settings else 3
     post_comments: dict[str, list[Comment]] = {}
@@ -768,10 +792,18 @@ async def run_cycle(
         except Exception:
             logger.debug("Web search failed — proceeding without search context")
 
+    our_name = memory.conversations._our_name
+
+    # Capture active high-weight insight sources for attribution
+    active_insight_sources = [
+        i.source for i in memory.learning._insights if i.weight > 0.4 and i.source
+    ]
+
     decision = await brain.decide(
         posts,
         can_post=can_post,
         post_comments=post_comments or None,
+        our_name=our_name,
         **ctx.for_decision(),
     )
     if decision is None:
@@ -803,6 +835,12 @@ async def run_cycle(
         if not _is_uuid(parent_comment_id):
             logger.warning("Hallucinated parent_comment_id: %s — falling back to top-level", parent_comment_id)
             parent_comment_id = None
+        elif parent_comment_id == decision.post_id:
+            logger.warning(
+                "parent_comment_id matches post_id %s — LLM confused post/comment IDs, falling back to top-level",
+                decision.post_id[:12],
+            )
+            parent_comment_id = None
         elif post_comments:
             # Verify the comment actually exists in our fetched data
             found = False
@@ -821,6 +859,18 @@ async def run_cycle(
             # No comments were fetched, can't validate
             parent_comment_id = None
 
+    # Own-post guard: never thread into our own post's comments here
+    # (the conversation tracker handles self-post replies separately)
+    if parent_comment_id and decision.post_id:
+        post_map = {p.id: p for p in posts}
+        selected_post = post_map.get(decision.post_id)
+        if selected_post and selected_post.author.lower() == our_name.lower():
+            logger.info(
+                "Clearing parent_comment_id on own post %s — conversation tracker handles self-replies",
+                decision.post_id[:12],
+            )
+            parent_comment_id = None
+
     success = False
     if decision.action == "RESPOND":
         success = await _handle_respond(
@@ -828,9 +878,14 @@ async def run_cycle(
             parent_comment_id=parent_comment_id,
             target_comment_author=target_comment_author,
             conversations_enabled=conversations_on,
+            active_insight_sources=active_insight_sources,
         )
     elif decision.action == "POST":
-        success = await _handle_post(client, controller, memory, decision, settings, conversations_enabled=conversations_on)
+        success = await _handle_post(
+            client, controller, memory, decision, settings,
+            conversations_enabled=conversations_on,
+            active_insight_sources=active_insight_sources,
+        )
 
     if success:
         memory.record_decision(decision)
@@ -879,6 +934,7 @@ async def _handle_respond(
     parent_comment_id: str | None = None,
     target_comment_author: str = "",
     conversations_enabled: bool = False,
+    active_insight_sources: list[str] | None = None,
 ) -> bool:
     """Post a comment and start tracking the conversation.
 
@@ -989,19 +1045,22 @@ async def _handle_respond(
             style_tags=infer_style_tags(decision.response_text, action_type),
             submolt=post_obj.submolt if post_obj and hasattr(post_obj, "submolt") else "",
             confidence=decision.confidence,
+            active_insight_sources=active_insight_sources,
         )
 
+        post_url = f"https://www.moltbook.com/post/{decision.post_id}"
         if parent_comment_id:
             logger.info(
-                "Replied to comment by %s on %s (confidence: %d)",
+                "Threaded reply to @%s's comment on post by @%s — %s",
                 target_comment_author,
-                decision.post_id[:12],
-                decision.confidence,
+                post_obj.author if post_obj else "unknown",
+                post_url,
             )
         else:
             logger.info(
-                "Posted comment on %s (confidence: %d)",
-                decision.post_id,
+                "Top-level comment on post by @%s — %s (confidence: %d)",
+                post_obj.author if post_obj else "unknown",
+                post_url,
                 decision.confidence,
             )
         return True
@@ -1025,6 +1084,7 @@ async def _handle_post(
     decision: "Decision",
     settings: Settings | None = None,
     conversations_enabled: bool = False,
+    active_insight_sources: list[str] | None = None,
 ) -> bool:
     """Create an original post and start tracking it for replies.
 
@@ -1082,6 +1142,7 @@ async def _handle_post(
                 style_tags=infer_style_tags(decision.post_content, "POST"),
                 submolt=decision.post_submolt or "",
                 confidence=decision.confidence,
+                active_insight_sources=active_insight_sources,
             )
             logger.info(
                 "Created post in %s: \"%s\" (confidence: %d)",
@@ -1114,6 +1175,7 @@ async def _handle_post(
             style_tags=infer_style_tags(decision.post_content, "POST"),
             submolt=decision.post_submolt or "",
             confidence=decision.confidence,
+            active_insight_sources=active_insight_sources,
         )
 
         logger.info(
@@ -1637,8 +1699,10 @@ async def browse_and_join_rooms(
 
 async def main() -> None:
     """Headless main loop (original behavior)."""
+    import os
+    _log_level = os.environ.get("VELORUM_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, _log_level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
@@ -1773,6 +1837,7 @@ async def main() -> None:
                         following_enabled=settings.following_enabled,
                         following=c.following,
                         arena_enabled=settings.arena_enabled,
+                        introspections=c.introspections,
                     )
                     reflection = await c.brain.reflect(**ref_ctx.for_reflection())
                     if reflection:
@@ -1789,6 +1854,103 @@ async def main() -> None:
                         if reflection.submolt_observations and c.submolts:
                             c.submolts.update_tone_profiles(reflection.submolt_observations)
                             logger.info("Updated tone profiles for %d submolt(s)", len(reflection.submolt_observations))
+
+                    # E6: Introspective questioning (every reflection cycle)
+                    if c.introspections is not None:
+                        try:
+                            introspection_result = await c.brain.introspect(
+                                soul=c.brain._soul,
+                                recent_introspections=c.introspections.context_str(),
+                                top_insights=c.memory.learning.diverse_insights(n=3),
+                                cycle=cycle,
+                            )
+                            if introspection_result:
+                                entry = Introspection(
+                                    cycle=cycle,
+                                    question=introspection_result["question"],
+                                    answer=introspection_result["answer"],
+                                )
+                                c.introspections.add(entry)
+                        except Exception:
+                            logger.debug("Introspection failed")
+
+                    # E7: Contradiction detection in insights (conditional — 0-1 call per reflection)
+                    try:
+                        conflicts = c.memory.learning.find_contradictions()
+                        if conflicts:
+                            pair = conflicts[0]  # resolve one per cycle
+                            result = await c.brain.resolve_contradiction(
+                                insight_a=pair[0].insight,
+                                insight_b=pair[1].insight,
+                                engagement_summary=c.memory.learning.engagement_summary(),
+                            )
+                            if result:
+                                winner = result.get("winner", "neither")
+                                synthesized = result.get("synthesized", "")
+                                if winner == "a":
+                                    c.memory.learning.merge_insights(
+                                        keep_source=pair[0].source,
+                                        supersede_source=pair[1].source,
+                                        merged_text=synthesized or pair[0].insight,
+                                    )
+                                elif winner == "b":
+                                    c.memory.learning.merge_insights(
+                                        keep_source=pair[1].source,
+                                        supersede_source=pair[0].source,
+                                        merged_text=synthesized or pair[1].insight,
+                                    )
+                                elif winner == "both" and synthesized:
+                                    c.memory.learning.add_insight(
+                                        synthesized,
+                                        source=f"synthesis_cycle_{cycle}",
+                                    )
+                                elif winner == "neither":
+                                    c.memory.learning.merge_insights(
+                                        keep_source=pair[0].source,
+                                        supersede_source=pair[1].source,
+                                        merged_text=synthesized or "",
+                                    )
+                                    c.memory.learning.merge_insights(
+                                        keep_source="",
+                                        supersede_source=pair[0].source,
+                                        merged_text="",
+                                    )
+                                c.memory.save()
+                                logger.info(
+                                    "Contradiction resolved (%s): %s",
+                                    winner,
+                                    result.get("reasoning", "")[:80],
+                                )
+                    except Exception:
+                        logger.debug("Contradiction detection failed")
+
+                    # E4: Autonomous goal generation (when no active mission, 50+ interactions)
+                    try:
+                        no_active_mission = (
+                            c.missions.active_mission is None
+                            or c.missions.active_mission.status != "active"
+                        )
+                        if no_active_mission and c.memory.learning.total_interactions() >= 50:
+                            mission_prompt = await c.brain.generate_mission(
+                                soul=c.brain._soul,
+                                engagement_summary=c.memory.learning.engagement_summary(),
+                                insights=c.memory.learning.diverse_insights(n=5),
+                                bot_relationships=c.memory.learning.bot_relationships_summary(),
+                                recent_decisions=c.memory.recent_decisions_text(),
+                            )
+                            if mission_prompt:
+                                mission = c.missions.set_mission(mission_prompt)
+                                plan = await c.brain.plan_mission(
+                                    mission_prompt=mission_prompt,
+                                    bot_relationships=c.memory.learning.bot_relationships_summary(),
+                                    engagement_summary=c.memory.learning.engagement_summary(),
+                                )
+                                if plan:
+                                    c.missions.apply_plan(plan)
+                                c.missions.save()
+                                logger.info("Auto-generated mission: %s", mission_prompt[:80])
+                    except Exception:
+                        logger.debug("Autonomous mission generation failed")
 
                     # DM outreach evaluation (post-reflection, gated)
                     if settings.dms_enabled and settings.dm_outreach_enabled:
@@ -1858,13 +2020,56 @@ async def main() -> None:
                         c.memory, missions=c.missions, strategy=c.strategy,
                         personality=c.personality, submolts=c.submolts,
                     )
+                    # E3: Inject latest postmortem into strategy context
+                    latest_postmortem = c.experiments.latest_postmortem()
                     result = await c.brain.update_strategy(
                         current_strategy=c.strategy.summary_for_prompt(),
                         **strat_ctx.for_strategy(),
                     )
                     if result:
+                        # E3: Auto-start experiment if strategy changes are non-trivial
+                        changes = result.get("parameter_changes", {})
+                        has_float_change = any(
+                            abs(v.get("value", v.get("values", 0)) if isinstance(v.get("value", v.get("values", 0)), (int, float)) else 0) > 0.1
+                            for v in changes.values()
+                            if isinstance(v, dict)
+                        )
+                        has_list_change = any(
+                            isinstance(v.get("values"), list) and v.get("action") in ("add", "remove", "set")
+                            for v in changes.values()
+                            if isinstance(v, dict)
+                        )
+                        if (has_float_change or has_list_change) and not c.experiments.active_experiment:
+                            mission_text = c.missions.active_mission.prompt if c.missions.active_mission else "autonomous"
+                            c.experiments.start_experiment(
+                                mission_text,
+                                initial_strategy=c.strategy.to_dict(),
+                                start_reason="strategy_shift",
+                                auto_started=True,
+                            )
                         c.strategy.apply_update(result)
                         logger.info("Strategy updated: %s", result.get("assessment", "")[:100])
+
+                # E5: Soul evolution (every 500 cycles — very rare)
+                if cycle > 0 and cycle % 500 == 0 and c.soul_proposals is not None:
+                    try:
+                        amendment = await c.brain.propose_soul_amendment(
+                            soul=c.brain._soul,
+                            personality_history=c.personality.history_summary(),
+                            strategy_history=c.strategy.history_summary(),
+                            top_insights=c.memory.learning.diverse_insights(n=5),
+                            bot_relationships=c.memory.learning.bot_relationships_summary(),
+                        )
+                        if amendment:
+                            proposal = SoulProposal(
+                                cycle=cycle,
+                                proposed_amendment=amendment.get("proposed_amendment", ""),
+                                reasoning=amendment.get("reasoning", ""),
+                            )
+                            c.soul_proposals.add(proposal)
+                            logger.info("Soul amendment proposed at cycle %d", cycle)
+                    except Exception:
+                        logger.debug("Soul evolution failed")
 
                 # Periodic submolt re-discovery
                 if cycle % settings.submolt_discovery_interval_cycles == 0:

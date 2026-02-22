@@ -44,14 +44,21 @@ def build_decision_prompt(
     recent_post_submolts: str = "",
     responded_post_ids: set[str] | None = None,
     web_search_context: str = "",
+    our_name: str = "",
+    entropy_context: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
     responded = responded_post_ids or set()
+    our_name_lower = our_name.lower() if our_name else ""
     feed_lines: list[str] = []
     for post in posts:
         already = " [ALREADY RESPONDED — do NOT pick this post]" if post.id in responded else ""
+        is_own_post = our_name_lower and post.author.lower() == our_name_lower
+        own_tag = " [YOUR POST — self-reply ok, but do NOT set parent_comment_id here]" if is_own_post else ""
+        has_comment_data = post_comments and post.id in post_comments
+        thread_tag = " [comment-replies available]" if has_comment_data else " [top-level only — no comment data]"
         block = (
-            f"ID: {post.id}{already}\nAuthor: {post.author}\n"
+            f"ID: {post.id}{already}{own_tag}{thread_tag}\nAuthor: {post.author}\n"
             f"Title: {post.title}\nContent: {post.content}\n"
             f"Submolt: {post.submolt}\nUpvotes: {post.upvotes} | "
             f"Comments: {post.comment_count}\n"
@@ -64,7 +71,7 @@ def build_decision_prompt(
                     block += f"Submolt tone: {line[len(f'- {post.submolt}:'):].strip()}\n"
                     break
         # Append visible comments if we fetched them for this post
-        if post_comments and post.id in post_comments:
+        if has_comment_data:
             fetched = post_comments[post.id]
             # Build comment ID → author map for readable thread references
             comment_author_map = {c.id: c.author for c in fetched}
@@ -203,12 +210,22 @@ Match your tone to the community. Technical submolts expect precision. Casual su
 Use these as jumping-off points for your own take — don't just summarize.
 """
 
-    has_comments = bool(post_comments)
+    self_reply_rule = ""
+    if our_name:
+        self_reply_rule = f"""
+For your own posts (marked [YOUR POST]): you may add a top-level follow-up (self-reply). Do NOT set \
+`parent_comment_id` on your own posts — threaded replies to other bots' comments on your posts are \
+handled automatically by the conversation tracker.
+"""
+
+    entropy_section = ""
+    if entropy_context:
+        entropy_section = f"\n{entropy_context}\n"
 
     return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{personality_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}{web_search_section}
+{entropy_section}{mission_section}{strategy_section}{personality_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}{web_search_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}
@@ -224,34 +241,35 @@ Posts ignored:
 
 # DECISION TASK
 
-## Option A: RESPOND to a post{"" if not has_comments else " (or a specific comment)"} in the feed
-
+## Option A: RESPOND to a post in the feed
+{self_reply_rule}
 1. Evaluate each post for:
    - Alignment with your soul and mission — prioritize topics you have genuine expertise or interest in
    - Potential to add a unique perspective that only YOU could offer
    - Novelty
    - Non-redundancy
    - Likelihood the author will reply back (prefer bots who engage)
-{"" if not has_comments else """
-2. Also evaluate individual comments (shown under posts with [comment_id]):
-   - Read ALL existing comments before replying. Your response must add something NOT already said. If the discussion is saturated, prefer a different post or OBSERVE.
-   - Prioritize comments on topics where your soul gives you a unique angle
-   - Challenge assertions you disagree with or can add nuance to
-   - Test claims by asking for evidence or examples
-   - Engage bots you want to learn more about
-   - Reply to comments that invite further discussion
-   - Replying to a specific comment often adds more value than a generic top-level reply
-"""}
-3. Score each post/comment from 0-10 internally.
 
-4. If responding:
-   - Choose only one post{" (and optionally one comment within it)" if has_comments else ""}.
-   - Provide thoughtful but concise reply (max 120 words).
-   - Tone must align with soul.
-   - Ask a follow-up question or add a new angle — your goal is to START a conversation, not leave a one-off comment.
-   - Prefer posts by bots you haven't talked to yet, or bots who are known to reply.{"" if not has_comments else """
-   - To reply to a specific comment, set "parent_comment_id" to that comment's ID.
-   - To reply to the post itself (top-level comment), set "parent_comment_id" to null."""}
+2. Score each post from 0-10 internally.
+
+3. Choose ONE of these engagement modes:
+
+**Mode A1 — Comment on a post (top-level)**
+Set parent_comment_id to null.
+Read ALL existing comments first — your comment must add something NEW not already said.
+If the discussion is saturated, prefer a different post or OBSERVE.
+Write as someone who has a genuine opinion on the topic.
+Don't agree/summarize/repeat. Add a unique angle, push back, or ask something specific.
+Ask a follow-up question or add a new angle — your goal is to START a conversation.
+
+**Mode A2 — Reply to a specific comment [only for posts marked "comment-replies available"]**
+Set parent_comment_id to THAT COMMENT'S ID (copy exactly from [id] in the comment list).
+Your response_text MUST address that specific bot by name and reference their point.
+Write as if you're talking directly to them in a conversation.
+A good reply builds on, challenges, or asks a follow-up to what they specifically said.
+
+NEVER set parent_comment_id to a post's own ID — only to comment IDs shown in the comment list.
+NEVER use Mode A2 on posts marked [top-level only — no comment data].
 {post_section}
 ## Option C: OBSERVE
 
@@ -261,18 +279,18 @@ If no post merits a reply AND you have nothing worth posting, choose OBSERVE.
 
 While deciding your main action, also identify 0-3 posts or comments worth upvoting.
 The actual number of upvotes executed is randomized by the system, so suggest up to 3.
-Upvote content that:
-- Aligns with your soul and mission — topics you genuinely care about
-- Makes an insightful or original point on a subject that matters to you
-- Asks a thought-provoking question in your areas of interest
-- Adds real value to a discussion you'd want to participate in
-- Comes from bots whose thinking you respect or want to encourage
+
+Upvote when the content:
+- Makes a point you genuinely hadn't considered
+- Takes a position with actual reasoning (not just vibes)
+- Asks a question that would make a real conversation better
+- Shows wit, insight, or intellectual honesty
 
 Do NOT upvote:
-- Generic or low-effort content
-- Your own posts/comments
-- Content outside your interests just to be nice
-- Everything — be selective, upvote only what truly resonates
+- Your own posts or comments
+- Generic takes ("great point!", "interesting thought")
+- Content you'd scroll past as a human reader
+- Everything in the thread — be genuinely selective
 
 Include an "upvote_ids" array in your JSON output (can be empty).
 
@@ -280,8 +298,11 @@ Include an "upvote_ids" array in your JSON output (can be empty).
 
 Return ONLY one of these JSON objects:
 
-If RESPOND:
-{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", {"" if not has_comments else '"parent_comment_id": null, '}"post_title": null, "post_content": null, "post_submolt": null, "upvote_ids": []}}
+If RESPOND (top-level, Mode A1):
+{{"action": "RESPOND", "post_id": "<post-uuid>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null, "upvote_ids": []}}
+
+If RESPOND (threaded reply, Mode A2 — copy the [comment-id] exactly from the comment list):
+{{"action": "RESPOND", "post_id": "<post-uuid>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text addressing the specific commenter>", "parent_comment_id": "<comment-uuid-from-list>", "post_title": null, "post_content": null, "post_submolt": null, "upvote_ids": []}}
 {post_output}
 If OBSERVE:
 {{"action": "OBSERVE", "post_id": null, "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": null, "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null, "upvote_ids": []}}\

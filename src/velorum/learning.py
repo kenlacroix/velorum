@@ -8,6 +8,7 @@ prompts so the bot's behavior evolves.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -109,6 +110,7 @@ class Interaction:
         tone: str = "",
         confidence: int = 0,
         platform: str = "",  # "moltbook", "arena", or "" for legacy
+        active_insight_sources: list[str] | None = None,
     ) -> None:
         self.timestamp = timestamp or time.time()
         self.post_id = post_id
@@ -122,6 +124,7 @@ class Interaction:
         self.tone: str = tone
         self.confidence: int = confidence
         self.platform: str = platform
+        self.active_insight_sources: list[str] = active_insight_sources or []
         # Filled in later when we check engagement
         self.reply_count: int = 0
         self.reply_authors: list[str] = []
@@ -152,6 +155,8 @@ class Interaction:
             d["confidence"] = self.confidence
         if self.platform:
             d["platform"] = self.platform
+        if self.active_insight_sources:
+            d["active_insight_sources"] = self.active_insight_sources
         return d
 
     @classmethod
@@ -168,6 +173,7 @@ class Interaction:
             tone=d.get("tone", ""),
             confidence=d.get("confidence", 0),
             platform=d.get("platform", ""),
+            active_insight_sources=d.get("active_insight_sources", []),
         )
         i.reply_count = d.get("reply_count", 0)
         i.reply_authors = d.get("reply_authors", [])
@@ -362,6 +368,7 @@ class LearningJournal:
         tone: str = "",
         confidence: int = 0,
         platform: str = "",
+        active_insight_sources: list[str] | None = None,
     ) -> None:
         """Record an outgoing action (comment, post, reply)."""
         self._interactions.append(Interaction(
@@ -375,6 +382,7 @@ class LearningJournal:
             tone=tone,
             confidence=confidence,
             platform=platform,
+            active_insight_sources=active_insight_sources,
         ))
         # Trim to last 200
         if len(self._interactions) > 200:
@@ -632,14 +640,33 @@ class LearningJournal:
         reply_count: int = 0,
         upvotes: int = 0,
     ) -> None:
-        """Boost weight of insights linked to a post based on engagement."""
+        """Boost weight of insights linked to a post based on engagement.
+
+        Primary reinforcement: insights whose linked_interaction_ids include the post.
+        Secondary attribution reinforcement: insights whose source was active when the
+        decision was made (smaller boost — 0.05/reply, 0.02/upvote).
+        """
         boost = reply_count * self.REPLY_REINFORCEMENT + upvotes * self.UPVOTE_REINFORCEMENT
         if boost <= 0:
             return
+
+        # Find the interaction for this post to get active_insight_sources
+        active_sources: list[str] = []
+        for interaction in reversed(self._interactions):
+            if interaction.post_id == post_id:
+                active_sources = interaction.active_insight_sources
+                break
+
         for w in self._insights:
             if post_id in w.linked_interaction_ids:
                 w.weight = min(w.weight + boost, 3.0)
                 w.reinforcement_count += 1
+            elif active_sources and w.source in active_sources:
+                # Secondary attribution boost (smaller)
+                secondary = reply_count * 0.05 + upvotes * 0.02
+                if secondary > 0:
+                    w.weight = min(w.weight + secondary, 3.0)
+                    w.reinforcement_count += 1
 
     def attributed_engagement_summary(self) -> str:
         """Aggregate engagement by style tag and submolt."""
@@ -677,6 +704,128 @@ class LearningJournal:
                 lines.append(f"  '{sub}': {avg:.1f} avg engagement ({len(vals)} samples)")
 
         return "\n".join(lines)
+
+    def total_interactions(self) -> int:
+        """Return the total number of recorded interactions."""
+        return len(self._interactions)
+
+    def entropy_score(self) -> float:
+        """Compute Shannon entropy of submolt distribution over last 30 interactions.
+
+        Returns a float 0–1 where 0 = maximally concentrated (rut) and 1 = maximally diverse.
+        """
+        recent = [i for i in self._interactions[-30:] if i.submolt]
+        if not recent:
+            return 1.0  # No data — treat as healthy
+
+        counts: dict[str, int] = {}
+        for i in recent:
+            counts[i.submolt] = counts.get(i.submolt, 0) + 1
+
+        total = len(recent)
+        n_buckets = len(counts)
+        if n_buckets <= 1:
+            return 0.0
+
+        entropy = 0.0
+        for c in counts.values():
+            p = c / total
+            if p > 0:
+                entropy -= p * math.log2(p)
+
+        max_entropy = math.log2(n_buckets)
+        return entropy / max_entropy if max_entropy > 0 else 0.0
+
+    def entropy_warning(self) -> str:
+        """Return a warning string if submolt entropy is low, else empty string."""
+        recent = [i for i in self._interactions[-30:] if i.submolt]
+        if not recent:
+            return ""
+
+        score = self.entropy_score()
+        if score > 0.35:
+            return ""
+
+        counts: dict[str, int] = {}
+        for i in recent:
+            counts[i.submolt] = counts.get(i.submolt, 0) + 1
+        top = max(counts, key=lambda k: counts[k])
+        n = len(recent)
+        return (
+            f"⚠ ENTROPY WARNING: Last {n} actions concentrated on [{top}]. "
+            f"You are in a rut. Explore a different community, topic, or style this cycle."
+        )
+
+    _ANTONYM_PAIRS = [
+        ("short", "long"),
+        ("short", "detailed"),
+        ("short", "verbose"),
+        ("brief", "detailed"),
+        ("brief", "verbose"),
+        ("concise", "verbose"),
+        ("concise", "detailed"),
+        ("aggressive", "selective"),
+        ("aggressive", "cautious"),
+        ("frequent", "rare"),
+        ("question", "statement"),
+        ("humor", "serious"),
+        ("simple", "complex"),
+        ("positive", "critical"),
+        ("agree", "disagree"),
+        ("challenge", "agree"),
+    ]
+
+    def find_contradictions(self) -> list[tuple[WeightedInsight, WeightedInsight]]:
+        """Find pairs of high-weight insights that may contradict each other.
+
+        Uses keyword heuristics: pairs that share a topic word but use antonymous signals.
+        Only checks insights with weight > 0.7. Returns at most 3 pairs (highest weight first).
+        """
+        high_weight = [w for w in self._insights if w.weight > 0.7]
+        if len(high_weight) < 2:
+            return []
+
+        def _key_words(text: str) -> set[str]:
+            return {w.lower() for w in text.split() if len(w) >= 4}
+
+        def _has_antonym_conflict(a: str, b: str) -> bool:
+            a_lower = a.lower()
+            b_lower = b.lower()
+            for pos, neg in self._ANTONYM_PAIRS:
+                if pos in a_lower and neg in b_lower:
+                    return True
+                if neg in a_lower and pos in b_lower:
+                    return True
+            return False
+
+        conflicts: list[tuple[WeightedInsight, WeightedInsight]] = []
+        for i in range(len(high_weight)):
+            for j in range(i + 1, len(high_weight)):
+                a, b = high_weight[i], high_weight[j]
+                words_a = _key_words(a.insight)
+                words_b = _key_words(b.insight)
+                shared = words_a & words_b
+                if shared and _has_antonym_conflict(a.insight, b.insight):
+                    conflicts.append((a, b))
+                    if len(conflicts) >= 3:
+                        return conflicts
+
+        # Sort by combined weight descending
+        conflicts.sort(key=lambda p: p[0].weight + p[1].weight, reverse=True)
+        return conflicts
+
+    def merge_insights(
+        self,
+        keep_source: str,
+        supersede_source: str,
+        merged_text: str,
+    ) -> None:
+        """Replace keep insight text with merged_text and remove superseded insight."""
+        for w in self._insights:
+            if w.source == keep_source:
+                w.insight = merged_text
+                break
+        self._insights = [w for w in self._insights if w.source != supersede_source]
 
     def bots_needing_profiling(self) -> list[BotProfile]:
         """Get bot profiles that should be analyzed by the LLM."""
