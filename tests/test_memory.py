@@ -141,3 +141,61 @@ class TestMemory:
         path.write_text("this is not json{{{")
         mem = Memory(persist_path=path, agent_name="Velorum")
         assert mem.decision_count == 0
+
+    def test_upvote_tracking(self, tmp_path):
+        mem = _make_memory(tmp_path)
+        assert not mem.has_upvoted("item-1")
+        mem.record_upvote("item-1")
+        assert mem.has_upvoted("item-1")
+        assert not mem.has_upvoted("item-2")
+
+    def test_upvote_persists_across_reload(self, tmp_path):
+        mem = _make_memory(tmp_path)
+        mem.record_upvote("item-1")
+        mem.record_upvote("item-2")
+        mem.save()
+
+        mem2 = _make_memory(tmp_path)
+        assert mem2.has_upvoted("item-1")
+        assert mem2.has_upvoted("item-2")
+        assert not mem2.has_upvoted("item-3")
+
+    def test_upvote_ids_capped_at_500(self, tmp_path):
+        mem = _make_memory(tmp_path)
+        for i in range(600):
+            mem._upvoted_ids.append(f"id-{i}")
+        mem._upvoted_ids_set = set(mem._upvoted_ids)
+        mem.save()
+
+        mem2 = _make_memory(tmp_path)
+        assert len(mem2._upvoted_ids) == 500
+
+    def test_old_memory_without_upvoted_ids_loads(self, tmp_path):
+        """Backward compat: old memory.json without upvoted_ids."""
+        import json
+        path = tmp_path / "memory.json"
+        path.write_text(json.dumps({
+            "responded_post_ids": ["p1"],
+            "decisions": [],
+            "ignored_post_ids": [],
+        }))
+        mem = Memory(persist_path=path, agent_name="Velorum")
+        assert not mem.has_upvoted("anything")
+        assert mem._upvoted_ids == []
+
+    def test_decision_with_upvote_ids(self, tmp_path):
+        """Decision model accepts upvote_ids field."""
+        d = Decision(
+            action="OBSERVE", post_id=None, confidence=3,
+            reasoning="Nothing", response_text=None,
+            upvote_ids=["id-1", "id-2"],
+        )
+        assert d.upvote_ids == ["id-1", "id-2"]
+
+    def test_decision_without_upvote_ids(self, tmp_path):
+        """Decision model defaults upvote_ids to empty list."""
+        d = Decision(
+            action="OBSERVE", post_id=None, confidence=3,
+            reasoning="Nothing", response_text=None,
+        )
+        assert d.upvote_ids == []

@@ -8,7 +8,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from velorum.arena.rooms import ArenaRoomTracker
 from velorum.conversations import ConversationTracker
+from velorum.dm import DMManager
 from velorum.learning import LearningJournal
 from velorum.moltbook.models import Decision
 
@@ -24,8 +26,12 @@ class Memory:
         self._topic_counts: Counter[str] = Counter()
         self._posted_titles: list[str] = []
         self._posted_ids: list[str] = []
+        self._upvoted_ids: list[str] = []
+        self._upvoted_ids_set: set[str] = set()
         self.conversations = ConversationTracker(our_name=agent_name)
         self.learning = LearningJournal()
+        self.dms = DMManager(our_name=agent_name)
+        self.arena_rooms = ArenaRoomTracker()
         self._load()
 
     def _load(self) -> None:
@@ -39,10 +45,16 @@ class Memory:
             self._topic_counts = Counter(data.get("topic_counts", {}))
             self._posted_titles = data.get("posted_titles", [])
             self._posted_ids = data.get("posted_ids", [])
+            self._upvoted_ids = data.get("upvoted_ids", [])
+            self._upvoted_ids_set = set(self._upvoted_ids)
             if "conversations" in data:
                 self.conversations.load_dict(data["conversations"])
             if "learning" in data:
                 self.learning.load_dict(data["learning"])
+            if "dms" in data:
+                self.dms.load_dict(data["dms"])
+            if "arena_rooms" in data:
+                self.arena_rooms.load_dict(data["arena_rooms"])
             logger.info("Memory loaded from %s", self._path)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load memory: %s", e)
@@ -56,8 +68,11 @@ class Memory:
             "topic_counts": dict(self._topic_counts),
             "posted_titles": self._posted_titles[-50:],
             "posted_ids": self._posted_ids,
+            "upvoted_ids": self._upvoted_ids[-500:],
             "conversations": self.conversations.to_dict(),
             "learning": self.learning.to_dict(),
+            "dms": self.dms.to_dict(),
+            "arena_rooms": self.arena_rooms.to_dict(),
         }
         self._path.write_text(json.dumps(data, indent=2))
 
@@ -76,6 +91,14 @@ class Memory:
         self._decisions.append(decision.model_dump())
         if decision.action == "RESPOND" and decision.post_id:
             self._responded_post_ids.append(decision.post_id)
+        self.save()
+
+    def has_upvoted(self, item_id: str) -> bool:
+        return item_id in self._upvoted_ids_set
+
+    def record_upvote(self, item_id: str) -> None:
+        self._upvoted_ids.append(item_id)
+        self._upvoted_ids_set.add(item_id)
         self.save()
 
     def record_post(self, title: str, post_id: str = "") -> None:
@@ -174,6 +197,14 @@ class Memory:
     @property
     def decision_count(self) -> int:
         return len(self._decisions)
+
+    def recent_post_submolts(self, n: int = 10) -> list[str]:
+        """Submolts used in recent posts, for diversity tracking."""
+        return [
+            d.get("post_submolt", "")
+            for d in self._decisions[-30:]
+            if d.get("action") == "POST" and d.get("post_submolt")
+        ][:n]
 
     @property
     def post_count(self) -> int:

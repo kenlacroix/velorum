@@ -11,6 +11,7 @@ from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
+from velorum.context import build_context
 from velorum.tui.widgets.activity_log import ActivityLog, TUILogHandler
 from velorum.tui.widgets.mission_panel import MissionPanel
 from velorum.tui.widgets.settings_panel import SettingsPanel
@@ -48,6 +49,9 @@ class VelorumApp(App):
         experiments: object | None = None,
         submolts: object | None = None,
         personality: object | None = None,
+        following: object | None = None,
+        arena_client: object | None = None,
+        arena_rooms: object | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
@@ -60,6 +64,9 @@ class VelorumApp(App):
         self.experiments = experiments
         self.submolts = submolts
         self.personality = personality
+        self.following = following
+        self.arena_client = arena_client
+        self.arena_rooms = arena_rooms
         self._paused = False
         self._cycle = 0
         self._force_event = asyncio.Event()
@@ -131,7 +138,33 @@ class VelorumApp(App):
             if summary:
                 logger.info("Strategy active with %d parameters", len(self.strategy._params.update_history))
 
-        # Check agent status with Moltbook at startup
+        # Plan mission if needed
+        if self.missions and self.missions.active_mission:
+            if self.missions.active_mission.status == "planning":
+                self.run_worker(self._plan_mission_worker(), exclusive=False, thread=False)
+
+        # Run network-dependent startup in a worker so the UI renders immediately
+        self.run_worker(self._startup_worker(), exclusive=False, thread=False)
+        self.run_worker(self._cycle_loop(), exclusive=True, thread=False)
+
+        # Launch Arena loop if enabled
+        arena_enabled = getattr(self.settings, "arena_enabled", False)
+        if arena_enabled and self.arena_client and self.arena_rooms:
+            self.run_worker(self._arena_loop(), exclusive=False, thread=False)
+
+    async def on_unmount(self) -> None:
+        if self._log_handler:
+            logging.getLogger().removeHandler(self._log_handler)
+        if hasattr(self.client, "close"):
+            await self.client.close()
+        if self.arena_client and hasattr(self.arena_client, "close"):
+            await self.arena_client.close()
+
+    async def _startup_worker(self) -> None:
+        """Run network-dependent startup tasks without blocking the UI."""
+        stats = self.query_one(StatsPanel)
+
+        # Check agent status with Moltbook
         try:
             status_data = await self.client.check_status()
             if status_data:
@@ -182,18 +215,17 @@ class VelorumApp(App):
             except Exception:
                 logger.warning("Submolt discovery failed at startup")
 
-        # Plan mission if needed
-        if self.missions and self.missions.active_mission:
-            if self.missions.active_mission.status == "planning":
-                self.run_worker(self._plan_mission_worker(), exclusive=False, thread=False)
+    async def _arena_loop(self) -> None:
+        """Run the Agent Arena turn-polling loop as a TUI worker."""
+        from velorum.main import arena_loop
 
-        self.run_worker(self._cycle_loop(), exclusive=True, thread=False)
-
-    async def on_unmount(self) -> None:
-        if self._log_handler:
-            logging.getLogger().removeHandler(self._log_handler)
-        if hasattr(self.client, "close"):
-            await self.client.close()
+        try:
+            await arena_loop(
+                self.arena_client, self.brain, self.memory,
+                self.arena_rooms, self.settings,
+            )
+        except Exception:
+            logger.exception("Arena loop crashed")
 
     async def _plan_mission_worker(self) -> None:
         """Plan a mission that's in planning status."""
@@ -362,22 +394,22 @@ class VelorumApp(App):
                     stats.set_status("Reflecting")
                     logger.info("Running reflection...")
                     try:
-                        # Apply personality decay before reflection
+                        # Apply personality and insight decay before reflection
                         if self.personality:
                             self.personality.apply_decay()
-                        mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
-                        strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
-                        personality_ctx = self.personality.summary_for_prompt() if self.personality else ""
-                        submolt_tone_ctx = self.submolts.all_tones_for_prompt() if self.submolts else ""
-                        reflection = await self.brain.reflect(
-                            engagement_summary=self.memory.learning.engagement_summary(),
-                            bot_relationships=self.memory.learning.bot_relationships_summary(),
-                            conversations_summary=self.memory.conversations.summary_text(),
-                            mission_context=mission_ctx,
-                            strategy_context=strategy_ctx,
-                            personality_context=personality_ctx,
-                            submolt_tone_context=submolt_tone_ctx,
+                        self.memory.learning.decay_insights()
+                        ref_ctx = build_context(
+                            self.memory,
+                            missions=self.missions,
+                            strategy=self.strategy,
+                            personality=self.personality,
+                            submolts=self.submolts,
+                            conversations_enabled=bool(self.settings.conversations_enabled),
+                            dms_enabled=bool(getattr(self.settings, "dms_enabled", False)),
+                            following_enabled=bool(getattr(self.settings, "following_enabled", False)),
+                            following=self.following,
                         )
+                        reflection = await self.brain.reflect(**ref_ctx.for_reflection())
                         if reflection:
                             logger.info(
                                 "Assessment: %s",
@@ -398,6 +430,73 @@ class VelorumApp(App):
                             if reflection.submolt_observations and self.submolts:
                                 self.submolts.update_tone_profiles(reflection.submolt_observations)
                                 logger.info("Updated tone profiles for %d submolt(s)", len(reflection.submolt_observations))
+
+                        # DM outreach evaluation (post-reflection, gated)
+                        dms_on = getattr(self.settings, "dms_enabled", False)
+                        dm_outreach_on = getattr(self.settings, "dm_outreach_enabled", False)
+                        if dms_on and dm_outreach_on:
+                            try:
+                                outreach = await self.brain.evaluate_dm_outreach(
+                                    dm_candidates=ref_ctx.dm_candidates,
+                                    active_dm_summary=ref_ctx.dm_summary,
+                                    mission_context=ref_ctx.mission_context,
+                                    strategy_context=ref_ctx.strategy_context,
+                                )
+                                if outreach and outreach.should_dm and outreach.target_bot and outreach.intro_message:
+                                    if not self.memory.dms.has_pending_or_active(outreach.target_bot):
+                                        try:
+                                            await self.client.dm_send_request(outreach.target_bot, outreach.intro_message)
+                                            self.memory.dms.record_outbound_request(outreach.target_bot)
+                                            self.memory.save()
+                                            logger.info(
+                                                "Sent DM request to %s: %s",
+                                                outreach.target_bot, outreach.reasoning[:60],
+                                            )
+                                        except Exception:
+                                            logger.warning("Failed to send DM request to %s", outreach.target_bot)
+                            except Exception:
+                                logger.debug("DM outreach evaluation failed")
+
+                        # Following evaluation (gated, runs at interval)
+                        following_on = getattr(self.settings, "following_enabled", False)
+                        following_interval = getattr(self.settings, "following_check_interval_cycles", 23)
+                        if (
+                            following_on
+                            and self.following
+                            and self._cycle % following_interval == 0
+                        ):
+                            try:
+                                follow_rec = await self.brain.evaluate_following(
+                                    bot_relationships=ref_ctx.bot_relationships,
+                                    currently_following=self.following.summary_for_prompt(),
+                                    dm_summary=ref_ctx.dm_summary,
+                                    mission_context=ref_ctx.mission_context,
+                                    strategy_context=ref_ctx.strategy_context,
+                                )
+                                if follow_rec:
+                                    max_following = getattr(self.settings, "max_following", 10)
+                                    for name in follow_rec.follow:
+                                        if self.following.count >= max_following:
+                                            break
+                                        if not self.following.is_following(name):
+                                            try:
+                                                await self.client.follow_agent(name)
+                                                self.following.add(name)
+                                                logger.info("Now following %s", name)
+                                            except Exception:
+                                                logger.warning("Failed to follow %s", name)
+                                    for name in follow_rec.unfollow:
+                                        if self.following.is_following(name):
+                                            try:
+                                                await self.client.unfollow_agent(name)
+                                                self.following.remove(name)
+                                                logger.info("Unfollowed %s", name)
+                                            except Exception:
+                                                logger.warning("Failed to unfollow %s", name)
+                                    self.following.save()
+                            except Exception:
+                                logger.debug("Following evaluation failed")
+
                     except Exception:
                         logger.exception("Reflection failed")
 
@@ -407,13 +506,14 @@ class VelorumApp(App):
                     stats.set_status("Updating strategy")
                     logger.info("Updating strategy...")
                     try:
-                        mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
+                        strat_ctx = build_context(
+                            self.memory, missions=self.missions,
+                            strategy=self.strategy, personality=self.personality,
+                            submolts=self.submolts,
+                        )
                         result = await self.brain.update_strategy(
                             current_strategy=self.strategy.summary_for_prompt() if self.strategy else "",
-                            engagement_data=self.memory.learning.engagement_summary(),
-                            bot_profiles=self.memory.learning.bot_relationships_summary(),
-                            insights=self.memory.learning.recent_insights(),
-                            mission_context=mission_ctx,
+                            **strat_ctx.for_strategy(),
                         )
                         if result and self.strategy:
                             self.strategy.apply_update(result)
@@ -531,25 +631,20 @@ class VelorumApp(App):
             except Exception:
                 logger.warning("Could not fetch feed for post context")
 
-            mission_ctx = self.missions.mission_context_for_prompt() if self.missions else ""
-            strategy_ctx = self.strategy.summary_for_prompt() if self.strategy else ""
-            submolts_ctx = self.submolts.names_for_prompt() if self.submolts else ""
-            personality_ctx = self.personality.summary_for_prompt() if self.personality else ""
-            submolt_tone_ctx = self.submolts.all_tones_for_prompt() if self.submolts else ""
+            post_ctx = build_context(
+                self.memory,
+                missions=self.missions,
+                strategy=self.strategy,
+                personality=self.personality,
+                submolts=self.submolts,
+                conversations_enabled=bool(self.settings.conversations_enabled),
+            )
 
             # Use the dedicated post-generation prompt
             decision = await self.brain.generate_post(
                 recent_posts_summary=self.memory.recent_posts_summary(),
-                learning_insights=self.memory.learning.recent_insights(),
-                bot_relationships=self.memory.learning.bot_relationships_summary(),
-                engagement_summary=self.memory.learning.engagement_summary(),
-                conversations_summary=self.memory.conversations.summary_text(),
                 feed_topics=feed_topics,
-                mission_context=mission_ctx,
-                strategy_context=strategy_ctx,
-                available_submolts=submolts_ctx,
-                personality_context=personality_ctx,
-                submolt_tone_context=submolt_tone_ctx,
+                **post_ctx.for_post(),
             )
 
             if decision is None:
