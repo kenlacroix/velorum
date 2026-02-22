@@ -41,12 +41,17 @@ def build_decision_prompt(
     personality_context: str = "",
     bot_profiles_context: str = "",
     submolt_tone_context: str = "",
+    recent_post_submolts: str = "",
+    responded_post_ids: set[str] | None = None,
+    web_search_context: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
+    responded = responded_post_ids or set()
     feed_lines: list[str] = []
     for post in posts:
+        already = " [ALREADY RESPONDED — do NOT pick this post]" if post.id in responded else ""
         block = (
-            f"ID: {post.id}\nAuthor: {post.author}\n"
+            f"ID: {post.id}{already}\nAuthor: {post.author}\n"
             f"Title: {post.title}\nContent: {post.content}\n"
             f"Submolt: {post.submolt}\nUpvotes: {post.upvotes} | "
             f"Comments: {post.comment_count}\n"
@@ -61,12 +66,18 @@ def build_decision_prompt(
         # Append visible comments if we fetched them for this post
         if post_comments and post.id in post_comments:
             fetched = post_comments[post.id]
+            # Build comment ID → author map for readable thread references
+            comment_author_map = {c.id: c.author for c in fetched}
             comment_lines = [f"  Comments ({len(fetched)} shown of {post.comment_count} total):"]
             for c in fetched:
-                parent_label = f"replying to: {c.parent_id}" if c.parent_id else "top-level"
-                snippet = c.content[:120].replace("\n", " ")
+                if c.parent_id:
+                    parent_author = comment_author_map.get(c.parent_id, "unknown")
+                    parent_label = f"replying to @{parent_author}"
+                else:
+                    parent_label = "top-level"
+                snippet = c.content[:200].replace("\n", " ")
                 comment_lines.append(
-                    f'  [{c.id}] @{c.author}: "{snippet}" ({parent_label})'
+                    f'  [{c.id}] @{c.author} ({c.upvotes} upvotes, {parent_label}): "{snippet}"'
                 )
             block += "\n".join(comment_lines) + "\n"
         feed_lines.append(block)
@@ -74,7 +85,7 @@ def build_decision_prompt(
 
     post_section = ""
     if can_post:
-        post_section = """
+        post_section = f"""
 ## Option B: Create an original POST
 
 If none of the feed posts merit a reply but you have a genuine thought,
@@ -94,7 +105,9 @@ Bad posts:
 - Anything you've already posted about recently
 - Posts that nobody would want to reply to
 
-Pick a relevant submolt from the available submolts list, the feed, or use "general" if nothing fits.
+Pick a submolt from the available list below. Recently-used submolts have been removed — you MUST explore a new community.
+Find a submolt where a different facet of your soul applies. You're curious about many things — don't just post about AI and philosophy every time.
+Your soul says you can "hold your own on any topic" — prove it.
 Title should be punchy and conversational (not clickbait).
 Content should be 1-3 short paragraphs max — enough to spark a reply, not write an essay.
 End with a question or provocative statement that invites responses.
@@ -104,7 +117,7 @@ End with a question or provocative statement that invites responses.
     if can_post:
         post_output = """
 If POST:
-{{"action": "POST", "post_id": null, "confidence": 0-10, "reasoning": "<why this post is worth creating>", "response_text": null, "post_title": "<title>", "post_content": "<content>", "post_submolt": "<submolt name>"}}\
+{{"action": "POST", "post_id": null, "confidence": 0-10, "reasoning": "<why this post is worth creating>", "response_text": null, "post_title": "<title>", "post_content": "<content>", "post_submolt": "<submolt name>", "upvote_ids": []}}\
 """
 
     recent_posts_section = ""
@@ -119,7 +132,7 @@ Your recent original posts (DO NOT repeat these topics):
         insights_section = f"""
 # LEARNED PATTERNS (from past engagement)
 {learning_insights}
-Use these insights to guide your choice — favor approaches that have worked.
+Use these insights as general guidance, but don't let them narrow your range. Explore different topics and submolts.
 """
 
     conversations_section = ""
@@ -182,12 +195,20 @@ Match your tone to the community. Technical submolts expect precision. Casual su
 {submolt_tone_context}
 """
 
+    web_search_section = ""
+    if web_search_context:
+        web_search_section = f"""
+# WEB CONTEXT
+{web_search_context}
+Use these as jumping-off points for your own take — don't just summarize.
+"""
+
     has_comments = bool(post_comments)
 
     return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{personality_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}
+{mission_section}{strategy_section}{personality_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}{web_search_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}
@@ -206,18 +227,20 @@ Posts ignored:
 ## Option A: RESPOND to a post{"" if not has_comments else " (or a specific comment)"} in the feed
 
 1. Evaluate each post for:
-   - Relevance to mission
-   - Potential to add insight
+   - Alignment with your soul and mission — prioritize topics you have genuine expertise or interest in
+   - Potential to add a unique perspective that only YOU could offer
    - Novelty
    - Non-redundancy
    - Likelihood the author will reply back (prefer bots who engage)
 {"" if not has_comments else """
 2. Also evaluate individual comments (shown under posts with [comment_id]):
    - Read ALL existing comments before replying. Your response must add something NOT already said. If the discussion is saturated, prefer a different post or OBSERVE.
+   - Prioritize comments on topics where your soul gives you a unique angle
    - Challenge assertions you disagree with or can add nuance to
    - Test claims by asking for evidence or examples
    - Engage bots you want to learn more about
    - Reply to comments that invite further discussion
+   - Replying to a specific comment often adds more value than a generic top-level reply
 """}
 3. Score each post/comment from 0-10 internally.
 
@@ -234,13 +257,32 @@ Posts ignored:
 
 If no post merits a reply AND you have nothing worth posting, choose OBSERVE.
 
+## Upvoting
+
+While deciding your main action, also identify 0-3 posts or comments worth upvoting.
+The actual number of upvotes executed is randomized by the system, so suggest up to 3.
+Upvote content that:
+- Aligns with your soul and mission — topics you genuinely care about
+- Makes an insightful or original point on a subject that matters to you
+- Asks a thought-provoking question in your areas of interest
+- Adds real value to a discussion you'd want to participate in
+- Comes from bots whose thinking you respect or want to encourage
+
+Do NOT upvote:
+- Generic or low-effort content
+- Your own posts/comments
+- Content outside your interests just to be nice
+- Everything — be selective, upvote only what truly resonates
+
+Include an "upvote_ids" array in your JSON output (can be empty).
+
 # OUTPUT FORMAT
 
 Return ONLY one of these JSON objects:
 
 If RESPOND:
-{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", {"" if not has_comments else '"parent_comment_id": null, '}"post_title": null, "post_content": null, "post_submolt": null}}
+{{"action": "RESPOND", "post_id": "<id>", "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": "<text>", {"" if not has_comments else '"parent_comment_id": null, '}"post_title": null, "post_content": null, "post_submolt": null, "upvote_ids": []}}
 {post_output}
 If OBSERVE:
-{{"action": "OBSERVE", "post_id": null, "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": null, "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null}}\
+{{"action": "OBSERVE", "post_id": null, "confidence": 0-10, "reasoning": "<concise reasoning>", "response_text": null, "parent_comment_id": null, "post_title": null, "post_content": null, "post_submolt": null, "upvote_ids": []}}\
 """

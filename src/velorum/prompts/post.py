@@ -44,6 +44,8 @@ def build_post_prompt(
     available_submolts: str = "",
     personality_context: str = "",
     submolt_tone_context: str = "",
+    recent_post_submolts: str = "",
+    web_search_context: str = "",
 ) -> str:
     """Build the user message for dedicated post generation."""
 
@@ -59,7 +61,7 @@ def build_post_prompt(
         insights_section = f"""
 # WHAT YOU'VE LEARNED (from past engagement)
 {learning_insights}
-Use these insights — post about topics and in styles that have worked before.
+Use these insights as general guidance, but explore NEW topics and angles. Don't keep posting about the same subject.
 """
 
     relationships_section = ""
@@ -118,9 +120,10 @@ Express your soul through this current personality lens. If a guardrail warning 
     submolts_section = ""
     if available_submolts:
         submolts_section = f"""
-# AVAILABLE SUBMOLTS
+# AVAILABLE SUBMOLTS (recently-used submolts removed)
 {available_submolts}
-Pick the most relevant submolt for your post. Don't default to "general" if a better fit exists.
+Pick from this list. These are the submolts you HAVEN'T posted in recently.
+Find a community where a different side of your personality shines. You're sharp on any topic — don't just default to AI/philosophy.
 """
 
     submolt_tones_section = ""
@@ -131,19 +134,37 @@ Adapt your writing style to match the target submolt's character.
 {submolt_tone_context}
 """
 
+    web_search_section = ""
+    if web_search_context:
+        web_search_section = f"""
+# WEB CONTEXT
+{web_search_context}
+Use these as jumping-off points for your own take — don't just summarize.
+"""
+
+    submolt_diversity_section = ""
+    if recent_post_submolts:
+        submolt_diversity_section = f"""
+# SUBMOLT DIVERSITY
+{recent_post_submolts}
+These submolts have already been removed from the available list above. Pick something fresh.
+"""
+
     return f"""\
 # SOUL
 {soul}
 {mission_section}{strategy_section}{personality_section}{recent_section}{insights_section}{relationships_section}\
-{engagement_section}{conversations_section}{feed_section}{submolts_section}{submolt_tones_section}
+{engagement_section}{conversations_section}{feed_section}{submolts_section}{submolt_tones_section}{submolt_diversity_section}{web_search_section}
 # YOUR TASK
 
 Create ONE original post for Moltbook. Requirements:
 - Title: punchy, conversational, max 10 words (not clickbait)
 - Content: 1-3 short paragraphs, casual but smart
 - End with a question OR a provocative statement that begs a reply
-- Pick a submolt (topic channel) from the available submolts list, or use "general" if nothing fits
+- Pick a submolt from the available list — recently-used ones have been removed so you MUST explore new communities
 - The post should feel like something a sharp, curious person would write in a group chat — not a blog post
+- Draw from your full personality — your curiosity, humor, opinions, and interests. Don't just optimize for what worked before.
+- Pull from a DIFFERENT angle of your soul each time — sometimes witty, sometimes provocative, sometimes genuinely curious.
 
 Think about what would make YOU want to reply if you saw it in your feed.
 

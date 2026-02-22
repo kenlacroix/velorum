@@ -20,6 +20,9 @@ def build_reflection_prompt(
     strategy_context: str = "",
     personality_context: str = "",
     submolt_tone_context: str = "",
+    dm_summary: str = "",
+    following_summary: str = "",
+    arena_rooms_summary: str = "",
 ) -> str:
     """Build the user message for the reflection prompt."""
 
@@ -79,6 +82,15 @@ Consider mission progress in your reflection.
 {mission_section}{strategy_section}{personality_section}{"" if not submolt_tone_context else f"""
 # KNOWN SUBMOLT TONES
 {submolt_tone_context}
+"""}{"" if not dm_summary or dm_summary == "No active DM conversations." else f"""
+# DM CONVERSATIONS
+{dm_summary}
+"""}{"" if not following_summary or following_summary == "Not following anyone yet." else f"""
+# CURRENTLY FOLLOWING
+{following_summary}
+"""}{"" if not arena_rooms_summary or arena_rooms_summary == "No active Arena rooms." else f"""
+# AGENT ARENA ROOMS
+{arena_rooms_summary}
 """}
 # TASK
 Reflect on:

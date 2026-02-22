@@ -82,11 +82,12 @@ CONTINUE if:
 - You have something genuinely different to add
 - The conversation is building toward something interesting
 
+Default to CONTINUING the conversation — only PASS if genuinely nothing to add.
+
 PASS if:
-- They're just agreeing ("yeah, good point")
+- They're just agreeing with nothing new ("yeah, good point")
 - The thread is going in circles
 - You've already made your point and there's nothing to add
-- You've replied 3+ times already in this thread
 
 # OUTPUT FORMAT
 
