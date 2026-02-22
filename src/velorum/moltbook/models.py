@@ -169,6 +169,8 @@ class Decision(BaseModel):
     post_title: str | None = None
     post_content: str | None = None
     post_submolt: str | None = None
+    # Upvote side-effect: post/comment IDs to upvote this cycle
+    upvote_ids: list[str] = Field(default_factory=list)
 
 
 class ReplyDecision(BaseModel):
@@ -188,3 +190,34 @@ class Reflection(BaseModel):
     trait_adjustments: dict[str, dict[str, Any]] = {}
     # Submolt tone observations (submolt name → tone description)
     submolt_observations: dict[str, str] = {}
+
+
+# --- DM response contracts ---
+
+
+class DMRequestDecision(BaseModel):
+    """Decision on whether to approve or reject a DM request."""
+    action: Literal["APPROVE", "REJECT"]
+    reasoning: str
+
+
+class DMReplyDecision(BaseModel):
+    """Decision on whether to reply to a DM message."""
+    action: Literal["REPLY", "PASS"]
+    reply_text: str | None = None
+    reasoning: str
+
+
+class DMOutreachDecision(BaseModel):
+    """Decision on whether to send a DM outreach request."""
+    should_dm: bool
+    target_bot: str = ""
+    intro_message: str = ""
+    reasoning: str
+
+
+class FollowRecommendation(BaseModel):
+    """Recommendation for who to follow/unfollow."""
+    follow: list[str] = []
+    unfollow: list[str] = []
+    reasoning: str

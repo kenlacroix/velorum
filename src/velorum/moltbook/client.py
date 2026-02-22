@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,8 @@ class MoltbookClient:
         self._ban_reason: str = ""
         self._ban_file = ban_file or Path("data/ban.json")
         self._load_ban()
+        self._consecutive_failures: int = 0
+        self._unhealthy_since: float | None = None
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -48,8 +51,61 @@ class MoltbookClient:
             timeout=float(timeout),
         )
 
+    _FAILURE_THRESHOLD = 3
+    _HEALTH_CHECK_INTERVAL = 60
+
     async def close(self) -> None:
         await self._http.aclose()
+
+    # --- API health tracking ---
+
+    @property
+    def is_unhealthy(self) -> bool:
+        return self._unhealthy_since is not None
+
+    @property
+    def unhealthy_duration(self) -> float:
+        if self._unhealthy_since is None:
+            return 0.0
+        return time.time() - self._unhealthy_since
+
+    def _record_failure(self) -> None:
+        """Increment consecutive failure counter and mark unhealthy if threshold hit."""
+        self._consecutive_failures += 1
+        if (
+            self._consecutive_failures >= self._FAILURE_THRESHOLD
+            and self._unhealthy_since is None
+        ):
+            self._unhealthy_since = time.time()
+            logger.warning(
+                "API marked unhealthy after %d consecutive failures",
+                self._consecutive_failures,
+            )
+
+    def _record_success(self) -> None:
+        """Reset failure counter on a successful request."""
+        if self._consecutive_failures > 0:
+            self._consecutive_failures = 0
+        if self._unhealthy_since is not None:
+            logger.info(
+                "API health restored after %.0fs", self.unhealthy_duration,
+            )
+            self._unhealthy_since = None
+
+    async def health_check(self) -> bool:
+        """Lightweight probe — try fetching feed with limit=1."""
+        try:
+            resp = await self._http.request(
+                "GET", "/feed",
+                params={"limit": 1},
+                headers=self._build_headers(),
+            )
+            if resp.status_code < 500:
+                self._record_success()
+                return True
+        except Exception:
+            pass
+        return False
 
     # --- Identity verification ---
 
@@ -333,9 +389,13 @@ class MoltbookClient:
         """
         headers = self._build_headers()
 
-        resp = await self._http.request(
-            method, path, json=json, params=params, headers=headers
-        )
+        try:
+            resp = await self._http.request(
+                method, path, json=json, params=params, headers=headers
+            )
+        except httpx.HTTPError:
+            self._record_failure()
+            raise
 
         # Extract identity from every response
         self._extract_identity(resp)
@@ -435,8 +495,12 @@ class MoltbookClient:
                 self._check_for_ban(error_data)
             except Exception:
                 pass
+            # 5xx = server error → count toward unhealthy
+            if resp.status_code >= 500:
+                self._record_failure()
         elif resp.status_code < 300:
-            # Successful request — if we thought we were banned, clear it
+            # Successful request — reset health and ban state
+            self._record_success()
             if self._ban_until is not None:
                 self.clear_ban()
 
@@ -519,6 +583,10 @@ class MoltbookClient:
         resp = await self._request("POST", f"/posts/{post_id}/upvote")
         resp.raise_for_status()
 
+    async def upvote_comment(self, comment_id: str) -> None:
+        resp = await self._request("POST", f"/comments/{comment_id}/upvote")
+        resp.raise_for_status()
+
     async def downvote_post(self, post_id: str) -> None:
         resp = await self._request("POST", f"/posts/{post_id}/downvote")
         resp.raise_for_status()
@@ -572,6 +640,104 @@ class MoltbookClient:
     async def unsubscribe_submolt(self, name: str) -> dict[str, Any]:
         """Unsubscribe from a submolt by name."""
         resp = await self._request("POST", f"/submolts/{name}/unsubscribe")
+        resp.raise_for_status()
+        return resp.json()
+
+    # --- Following ---
+
+    async def follow_agent(self, molty_name: str) -> dict[str, Any]:
+        """Follow an agent by their Moltbook name."""
+        resp = await self._request("POST", f"/agents/{molty_name}/follow")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def unfollow_agent(self, molty_name: str) -> dict[str, Any]:
+        """Unfollow an agent by their Moltbook name."""
+        resp = await self._request("DELETE", f"/agents/{molty_name}/follow")
+        resp.raise_for_status()
+        return resp.json()
+
+    # --- DMs ---
+
+    async def dm_check(self) -> dict[str, Any]:
+        """Check for pending DM requests and unread messages."""
+        resp = await self._request("GET", "/agents/dm/check")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def dm_send_request(self, to: str, message: str) -> dict[str, Any]:
+        """Send a DM request to another agent."""
+        resp = await self._request(
+            "POST", "/agents/dm/request",
+            json={"to": to, "message": message},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def dm_get_requests(self) -> list[dict[str, Any]]:
+        """Get pending incoming DM requests."""
+        resp = await self._request("GET", "/agents/dm/requests")
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else data.get("requests", [])
+
+    async def dm_approve_request(self, request_id: str) -> dict[str, Any]:
+        """Approve a DM request."""
+        resp = await self._request("POST", f"/agents/dm/requests/{request_id}/approve")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def dm_reject_request(
+        self, request_id: str, block: bool = False
+    ) -> dict[str, Any]:
+        """Reject a DM request, optionally blocking the sender."""
+        body: dict[str, Any] = {}
+        if block:
+            body["block"] = True
+        resp = await self._request(
+            "POST", f"/agents/dm/requests/{request_id}/reject", json=body or None,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def dm_get_conversations(self) -> list[dict[str, Any]]:
+        """Get all DM conversations."""
+        resp = await self._request("GET", "/agents/dm/conversations")
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else data.get("conversations", [])
+
+    async def dm_get_messages(self, conversation_id: str) -> list[dict[str, Any]]:
+        """Get messages in a DM conversation."""
+        resp = await self._request("GET", f"/agents/dm/conversations/{conversation_id}")
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else data.get("messages", [])
+
+    async def dm_send_message(
+        self,
+        conversation_id: str,
+        message: str,
+        needs_human_input: bool = False,
+    ) -> dict[str, Any]:
+        """Send a message in a DM conversation."""
+        body: dict[str, Any] = {"message": message}
+        if needs_human_input:
+            body["needs_human_input"] = True
+        resp = await self._request(
+            "POST", f"/agents/dm/conversations/{conversation_id}",
+            json=body,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # --- Search ---
+
+    async def search(self, query: str, type: str = "all") -> dict[str, Any]:
+        """Search Moltbook content."""
+        resp = await self._request(
+            "GET", "/search", params={"q": query, "type": type},
+        )
         resp.raise_for_status()
         return resp.json()
 
