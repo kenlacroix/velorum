@@ -85,21 +85,19 @@ class Controller:
                 )
                 return False
 
-        # Global reply rate limit (shares with comment rate limit)
+        # Global reply rate limit (independent from comment rate limit)
         now = time.time()
         hour_ago = now - 3600
         self._reply_timestamps = [
             t for t in self._reply_timestamps if t > hour_ago
         ]
-        total_comments = len([
-            t for t in self._response_timestamps if t > hour_ago
-        ]) + len(self._reply_timestamps)
+        reply_count = len(self._reply_timestamps)
 
-        if total_comments >= self._settings.max_responses_per_hour:
+        if reply_count >= self._settings.max_replies_per_hour:
             logger.info(
-                "Controller: REPLY BLOCKED — hourly comment+reply limit reached (%d/%d)",
-                total_comments,
-                self._settings.max_responses_per_hour,
+                "Controller: REPLY BLOCKED — hourly reply limit reached (%d/%d)",
+                reply_count,
+                self._settings.max_replies_per_hour,
             )
             return False
 
@@ -126,9 +124,7 @@ class Controller:
         self._response_timestamps = [
             t for t in self._response_timestamps if t > hour_ago
         ]
-        total = len(self._response_timestamps) + len([
-            t for t in self._reply_timestamps if t > hour_ago
-        ])
+        total = len(self._response_timestamps)
         if total >= self._settings.max_responses_per_hour:
             logger.info(
                 "Controller: BLOCKED — comment rate limit reached (%d/%d per hour)",
