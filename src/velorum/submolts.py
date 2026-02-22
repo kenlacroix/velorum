@@ -61,6 +61,7 @@ class SubmoltManager:
     def names_for_prompt(self, exclude: set[str] | None = None) -> str:
         """Return a formatted string of known submolts for prompt injection.
 
+        Always uses newline-per-submolt format so descriptions are readable.
         If *exclude* is provided, those submolt names are omitted from the list
         so the LLM is forced to pick from the remaining options.
         """
@@ -74,13 +75,13 @@ class SubmoltManager:
                 continue
             desc = s.get("description", "")
             subs = s.get("subscribers", s.get("subscriber_count", ""))
-            entry = name
+            entry = f"- {name}"
             if desc:
-                entry += f" — {desc[:80]}"
+                entry += f": {desc[:120]}"
             if subs:
                 entry += f" ({subs} subscribers)"
             lines.append(entry)
-        return ", ".join(lines[:30]) if len(lines) <= 30 else "\n".join(f"- {l}" for l in lines)
+        return "\n".join(lines)
 
     def update_discovered(self, submolts: list[dict[str, Any]]) -> None:
         """Update the discovered submolts list from API response."""

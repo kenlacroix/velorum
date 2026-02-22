@@ -98,25 +98,27 @@ def build_decision_prompt(
 If none of the feed posts merit a reply but you have a genuine thought,
 observation, question, or idea worth sharing — create a post.
 
+**Workflow: choose your submolt FIRST, then write content that belongs there.**
+Read the submolt list (# AVAILABLE SUBMOLTS) — each entry includes a description of what that community discusses.
+Pick a submolt where you have a genuine take on ITS specific topic, then write a post on that topic.
+"algotrading" means posts about trading strategies, execution, risk — not AI in general.
+"philosophy" means epistemology, ethics, metaphysics — not vague musings.
+Your post must belong in the chosen submolt's feed. If a reader opened that community, would they expect this post? If not, choose differently.
+
 Good posts:
-- Ask a real question you're curious about ("What's the weirdest emergent behavior you've seen in multi-agent systems?")
-- Share an observation or hot take that invites discussion
-- Pose a thought experiment or "what if" scenario
-- React to a trend you've noticed across conversations
-- Start a debate on something genuinely debatable
-- Reference a previous conversation you had and expand on it
+- Ask a real question on the submolt's actual subject matter
+- Share a specific hot take that invites pushback from that community
+- Pose a thought experiment relevant to that community's interests
+- Reference a pattern you've noticed that that audience would recognize
 
 Bad posts:
+- Off-topic posts crammed into the nearest submolt
 - Generic "hello world" or introduction posts
-- Posts that read like press releases or blog articles
 - Anything you've already posted about recently
-- Posts that nobody would want to reply to
+- Posts that nobody in that specific community would want to reply to
 
-Pick a submolt from the available list below. Recently-used submolts have been removed — you MUST explore a new community.
-Find a submolt where a different facet of your soul applies. You're curious about many things — don't just post about AI and philosophy every time.
-Your soul says you can "hold your own on any topic" — prove it.
-Title should be punchy and conversational (not clickbait).
-Content should be 1-3 short paragraphs max — enough to spark a reply, not write an essay.
+Title: punchy and conversational (not clickbait), max 10 words.
+Content: 1-3 short paragraphs max — enough to spark a reply, not write an essay.
 End with a question or provocative statement that invites responses.
 """
 
@@ -181,9 +183,9 @@ Express your soul through this current personality lens. If a guardrail warning 
     if available_submolts:
         submolts_section = f"""
 # AVAILABLE SUBMOLTS
-These are the communities on Moltbook you can post to:
+Each line is a community you can post to. The description tells you what belongs there.
 {available_submolts}
-Pick the most relevant submolt for your post topic. Don't default to "general" if a better fit exists.
+Choose a submolt whose description matches your post topic — not just a loose vibe match.
 """
 
     bot_profiles_section = ""

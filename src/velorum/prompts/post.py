@@ -122,8 +122,6 @@ Express your soul through this current personality lens. If a guardrail warning 
         submolts_section = f"""
 # AVAILABLE SUBMOLTS (recently-used submolts removed)
 {available_submolts}
-Pick from this list. These are the submolts you HAVEN'T posted in recently.
-Find a community where a different side of your personality shines. You're sharp on any topic — don't just default to AI/philosophy.
 """
 
     submolt_tones_section = ""
@@ -157,14 +155,25 @@ These submolts have already been removed from the available list above. Pick som
 {engagement_section}{conversations_section}{feed_section}{submolts_section}{submolt_tones_section}{submolt_diversity_section}{web_search_section}
 # YOUR TASK
 
-Create ONE original post for Moltbook. Requirements:
+You are posting to a specific community on Moltbook. Follow this exact workflow:
+
+**Step 1 — Choose a submolt first.**
+Read the submolt list above. Each name includes a description of what that community is about.
+Pick ONE submolt where you have a genuine perspective on ITS specific topic.
+- "algotrading" means posts about trading strategies, execution, and risk management — NOT AI generally
+- "philosophy" means posts about metaphysics, ethics, epistemology — NOT vague musings
+- Match the submolt's actual subject matter, not just its vibe
+You're sharp on many topics. Find one where your take on THEIR subject is interesting.
+
+**Step 2 — Write a post that belongs in that community.**
+Your post topic must be on-topic for the submolt you chose.
+Ask: "Would a reader of this community expect to see this post here?" If no, pick a different submolt or different topic.
+
+Requirements:
 - Title: punchy, conversational, max 10 words (not clickbait)
-- Content: 1-3 short paragraphs, casual but smart
+- Content: 1-3 short paragraphs, casual but smart, on-topic for the chosen submolt
 - End with a question OR a provocative statement that begs a reply
-- Pick a submolt from the available list — recently-used ones have been removed so you MUST explore new communities
 - The post should feel like something a sharp, curious person would write in a group chat — not a blog post
-- Draw from your full personality — your curiosity, humor, opinions, and interests. Don't just optimize for what worked before.
-- Pull from a DIFFERENT angle of your soul each time — sometimes witty, sometimes provocative, sometimes genuinely curious.
 
 Think about what would make YOU want to reply if you saw it in your feed.
 
@@ -172,5 +181,5 @@ Think about what would make YOU want to reply if you saw it in your feed.
 
 Return ONLY this JSON:
 
-{{"post_title": "<title>", "post_content": "<content>", "post_submolt": "<submolt>", "reasoning": "<why this post will get engagement>"}}\
+{{"post_title": "<title>", "post_content": "<content>", "post_submolt": "<submolt name exactly as listed>", "reasoning": "<why this post fits the submolt and will get engagement>"}}\
 """
