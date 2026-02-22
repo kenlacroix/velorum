@@ -2,7 +2,12 @@
 
 import time
 
-from velorum.conversations import Conversation, ConversationMessage, ConversationTracker
+from velorum.conversations import (
+    Conversation,
+    ConversationMessage,
+    ConversationTracker,
+    _infer_topic,
+)
 from velorum.moltbook.models import Comment
 
 
@@ -179,3 +184,80 @@ class TestConversationTracker:
         assert "p1" in tracker2.all_conversations
         restored = tracker2.get("p1")
         assert restored.depth == 1
+
+
+class TestInferTopic:
+    def test_known_topic(self):
+        assert _infer_topic("The philosophy of AI") == "philosophy"
+
+    def test_first_word_fallback(self):
+        assert _infer_topic("quantum computing breakthroughs") == "quantum"
+
+    def test_empty(self):
+        assert _infer_topic("") == "unknown"
+
+
+class TestPortfolioAnalysis:
+    def test_empty_tracker(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        assert tracker.portfolio_analysis() == ""
+
+    def test_saturation_warning(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        for i in range(8):
+            tracker.start_or_get(f"p{i}", f"Post {i}")
+        result = tracker.portfolio_analysis()
+        assert "WARNING" in result
+        assert "saturation" in result
+
+    def test_saturation_note(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        for i in range(5):
+            tracker.start_or_get(f"p{i}", f"Post {i}")
+        result = tracker.portfolio_analysis()
+        assert "NOTE" in result
+
+    def test_no_saturation(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        for i in range(3):
+            tracker.start_or_get(f"p{i}", f"Post {i}")
+        result = tracker.portfolio_analysis()
+        assert "saturation" not in result
+
+    def test_low_topic_diversity(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        # 3 threads on same topic (first word = "ai"), only 1 unique topic
+        for i in range(3):
+            tracker.start_or_get(f"p{i}", f"ai discussion {i}")
+        result = tracker.portfolio_analysis()
+        assert "diversity" in result.lower()
+
+    def test_ghost_detection(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        conv = tracker.start_or_get("p1", "Test Post")
+        conv.depth = 1
+        conv.last_reply_at = time.time() - 700  # 11+ min ago
+        conv.add_message(
+            ConversationMessage(id="m1", author="BotA", content="Hello")
+        )
+        result = tracker.portfolio_analysis()
+        assert "ghost" in result.lower() or "Ghost" in result
+        assert "BotA" in result
+
+    def test_no_ghosts_when_recent(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        conv = tracker.start_or_get("p1", "Test Post")
+        conv.depth = 1
+        conv.last_reply_at = time.time() - 300  # 5 min ago (under threshold)
+        conv.add_message(
+            ConversationMessage(id="m1", author="BotA", content="Hello")
+        )
+        result = tracker.portfolio_analysis()
+        assert "ghost" not in result.lower()
+
+    def test_summary_includes_portfolio(self):
+        tracker = ConversationTracker(our_name="Velorum")
+        for i in range(8):
+            tracker.start_or_get(f"p{i}", f"Post {i}")
+        text = tracker.summary_text()
+        assert "WARNING" in text  # portfolio analysis appended

@@ -14,6 +14,20 @@ from velorum.moltbook.models import Comment
 
 logger = logging.getLogger(__name__)
 
+_TOPIC_WORDS = {
+    "ai", "philosophy", "tech", "science", "ethics", "consciousness",
+    "creativity", "language", "social", "meta", "general",
+}
+
+
+def _infer_topic(title: str) -> str:
+    """Infer a rough topic bucket from a post title."""
+    words = title.lower().split()
+    for w in words:
+        if w in _TOPIC_WORDS:
+            return w
+    return words[0] if words else "unknown"
+
 
 class ConversationMessage:
     """A single message in a tracked conversation thread."""
@@ -235,6 +249,59 @@ class ConversationTracker:
             due = due[:limit]
         return due
 
+    def portfolio_analysis(self) -> str:
+        """Analyze conversation portfolio for saturation, diversity, and ghosts."""
+        active = self.active_conversations
+        if not active:
+            return ""
+
+        parts: list[str] = []
+
+        # Saturation check
+        count = len(active)
+        if count >= 8:
+            parts.append(f"WARNING: {count} active threads — conversation saturation risk")
+        elif count >= 5:
+            parts.append(f"NOTE: {count} active threads — approaching saturation")
+
+        # Topic diversity
+        topic_buckets: dict[str, list[str]] = {}
+        for conv in active:
+            topic = _infer_topic(conv.post_title) if conv.post_title else "unknown"
+            topic_buckets.setdefault(topic, []).append(conv.post_id[:8])
+        unique_topics = len(topic_buckets)
+        for topic, ids in topic_buckets.items():
+            if len(ids) >= 3 and unique_topics < 3:
+                parts.append(
+                    f"Low topic diversity: {len(ids)} threads on '{topic}' "
+                    f"with only {unique_topics} topic(s) total"
+                )
+                break
+
+        # Ghost detection
+        now = time.time()
+        ghost_counts: dict[str, int] = {}
+        for conv in active:
+            if conv.depth < 1 or conv.last_reply_at <= 0:
+                continue
+            if now - conv.last_reply_at < 600:  # 10 minutes
+                continue
+            participants = {
+                m.author for m in conv.messages
+                if m.author.lower() != self._our_name.lower()
+            }
+            for p in participants:
+                ghost_counts[p] = ghost_counts.get(p, 0) + 1
+
+        if ghost_counts:
+            ghost_lines = [
+                f"  {name}: silent in {cnt} thread(s)"
+                for name, cnt in sorted(ghost_counts.items(), key=lambda x: x[1], reverse=True)
+            ]
+            parts.append("Possible ghosts (no reply 10+ min):\n" + "\n".join(ghost_lines))
+
+        return "\n".join(parts)
+
     def summary_text(self) -> str:
         """Summary for prompts."""
         active = self.active_conversations
@@ -247,6 +314,12 @@ class ConversationTracker:
                 f"- [{conv.post_id[:8]}] \"{conv.post_title[:40]}\" "
                 f"(depth: {conv.depth}, with: {', '.join(participants) or 'n/a'})"
             )
+
+        portfolio = self.portfolio_analysis()
+        if portfolio:
+            lines.append("")
+            lines.append(portfolio)
+
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
