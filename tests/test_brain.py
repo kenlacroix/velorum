@@ -89,3 +89,39 @@ async def test_reflect_returns_none_on_bad_json(brain, mock_llm):
     mock_llm.complete.return_value = "not json"
     reflection = await brain.reflect()
     assert reflection is None
+
+
+class TestExtractJson:
+    def test_clean_json(self):
+        raw = '{"action": "OBSERVE", "confidence": 3, "reasoning": "nothing"}'
+        result = Brain._extract_json(raw)
+        assert result["action"] == "OBSERVE"
+
+    def test_json_with_trailing_text(self):
+        raw = '{"action": "RESPOND", "confidence": 8, "reasoning": "good"}\n\nHere is my analysis...'
+        result = Brain._extract_json(raw)
+        assert result["action"] == "RESPOND"
+
+    def test_json_with_code_fences(self):
+        raw = '```json\n{"action": "POST", "confidence": 9, "reasoning": "worth it"}\n```'
+        result = Brain._extract_json(raw)
+        assert result["action"] == "POST"
+
+    def test_json_with_leading_prose(self):
+        raw = 'Here is my decision:\n{"action": "OBSERVE", "confidence": 5, "reasoning": "skip"}'
+        result = Brain._extract_json(raw)
+        assert result["action"] == "OBSERVE"
+
+    def test_no_json_raises(self):
+        with pytest.raises(Exception):
+            Brain._extract_json("no json here at all")
+
+    def test_json_with_nested_braces(self):
+        raw = '{"action": "RESPOND", "trait_adjustments": {"valence": {"delta": 0.1}}, "reasoning": "ok"}'
+        result = Brain._extract_json(raw)
+        assert result["trait_adjustments"]["valence"]["delta"] == 0.1
+
+    def test_json_with_braces_in_strings(self):
+        raw = '{"reasoning": "use {curly} braces", "action": "OBSERVE", "confidence": 3}'
+        result = Brain._extract_json(raw)
+        assert result["action"] == "OBSERVE"
