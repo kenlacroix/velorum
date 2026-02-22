@@ -8,10 +8,88 @@ prompts so the bot's behavior evolves.
 from __future__ import annotations
 
 import logging
+import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Style-tag inference (pure heuristic, no LLM)
+# ---------------------------------------------------------------------------
+
+_QUESTION_RE = re.compile(r"\?")
+_DISAGREE_RE = re.compile(r"\b(but|however|disagree|although|on the other hand)\b", re.IGNORECASE)
+_HUMOR_RE = re.compile(r"\b(haha|lol|lmao|rofl)\b|!{2,}", re.IGNORECASE)
+_SPECULATIVE_RE = re.compile(r"\b(what if|imagine|hypothetically|suppose)\b", re.IGNORECASE)
+_ANALYTICAL_RE = re.compile(r"\b(evidence|data|analysis|statistic|measure|correlation)\b", re.IGNORECASE)
+
+
+def infer_style_tags(text: str, action: str = "") -> list[str]:
+    """Detect style tags from text content using cheap heuristics."""
+    tags: list[str] = []
+    if _QUESTION_RE.search(text):
+        tags.append("question")
+    if _DISAGREE_RE.search(text):
+        tags.append("disagreement")
+    if _HUMOR_RE.search(text):
+        tags.append("humor")
+    if _SPECULATIVE_RE.search(text):
+        tags.append("speculative")
+    if _ANALYTICAL_RE.search(text):
+        tags.append("analytical")
+
+    word_count = len(text.split())
+    if word_count <= 15:
+        tags.append("concise")
+    elif word_count >= 60:
+        tags.append("verbose")
+
+    return tags
+
+
+# ---------------------------------------------------------------------------
+# WeightedInsight
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WeightedInsight:
+    """An insight with a weight that compounds via reinforcement."""
+
+    insight: str
+    source: str = ""
+    timestamp: float = 0.0
+    weight: float = 1.0
+    reinforcement_count: int = 0
+    linked_interaction_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.timestamp == 0.0:
+            self.timestamp = time.time()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "insight": self.insight,
+            "source": self.source,
+            "timestamp": self.timestamp,
+            "weight": self.weight,
+            "reinforcement_count": self.reinforcement_count,
+            "linked_interaction_ids": self.linked_interaction_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> WeightedInsight:
+        return cls(
+            insight=d.get("insight", ""),
+            source=d.get("source", ""),
+            timestamp=d.get("timestamp", 0.0),
+            weight=d.get("weight", 1.0),
+            reinforcement_count=d.get("reinforcement_count", 0),
+            linked_interaction_ids=d.get("linked_interaction_ids", []),
+        )
 
 
 class Interaction:
@@ -26,6 +104,11 @@ class Interaction:
         our_text: str = "",
         target_author: str = "",
         topic_hint: str = "",
+        style_tags: list[str] | None = None,
+        submolt: str = "",
+        tone: str = "",
+        confidence: int = 0,
+        platform: str = "",  # "moltbook", "arena", or "" for legacy
     ) -> None:
         self.timestamp = timestamp or time.time()
         self.post_id = post_id
@@ -33,6 +116,12 @@ class Interaction:
         self.our_text = our_text
         self.target_author = target_author
         self.topic_hint = topic_hint
+        # Attribution
+        self.style_tags: list[str] = style_tags or []
+        self.submolt: str = submolt
+        self.tone: str = tone
+        self.confidence: int = confidence
+        self.platform: str = platform
         # Filled in later when we check engagement
         self.reply_count: int = 0
         self.reply_authors: list[str] = []
@@ -40,7 +129,7 @@ class Interaction:
         self.checked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "timestamp": self.timestamp,
             "post_id": self.post_id,
             "action": self.action,
@@ -52,6 +141,18 @@ class Interaction:
             "upvotes": self.upvotes,
             "checked": self.checked,
         }
+        # Only include attribution fields if populated (compact serialization)
+        if self.style_tags:
+            d["style_tags"] = self.style_tags
+        if self.submolt:
+            d["submolt"] = self.submolt
+        if self.tone:
+            d["tone"] = self.tone
+        if self.confidence:
+            d["confidence"] = self.confidence
+        if self.platform:
+            d["platform"] = self.platform
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Interaction:
@@ -62,6 +163,11 @@ class Interaction:
             our_text=d.get("our_text", ""),
             target_author=d.get("target_author", ""),
             topic_hint=d.get("topic_hint", ""),
+            style_tags=d.get("style_tags", []),
+            submolt=d.get("submolt", ""),
+            tone=d.get("tone", ""),
+            confidence=d.get("confidence", 0),
+            platform=d.get("platform", ""),
         )
         i.reply_count = d.get("reply_count", 0)
         i.reply_authors = d.get("reply_authors", [])
@@ -230,10 +336,16 @@ class BotProfile:
 class LearningJournal:
     """Tracks engagement patterns and bot relationships over time."""
 
+    MAX_INSIGHTS = 30
+    INSIGHT_DECAY_FACTOR = 0.95
+    REPLY_REINFORCEMENT = 0.1
+    UPVOTE_REINFORCEMENT = 0.05
+    INSIGHT_WEIGHT_FLOOR = 0.1
+
     def __init__(self) -> None:
         self._interactions: list[Interaction] = []
         self._bot_profiles: dict[str, BotProfile] = {}
-        self._insights: list[dict[str, Any]] = []
+        self._insights: list[WeightedInsight] = []
 
     # --- Recording ---
 
@@ -245,6 +357,11 @@ class LearningJournal:
         our_text: str,
         target_author: str = "",
         topic_hint: str = "",
+        style_tags: list[str] | None = None,
+        submolt: str = "",
+        tone: str = "",
+        confidence: int = 0,
+        platform: str = "",
     ) -> None:
         """Record an outgoing action (comment, post, reply)."""
         self._interactions.append(Interaction(
@@ -253,6 +370,11 @@ class LearningJournal:
             our_text=our_text,
             target_author=target_author,
             topic_hint=topic_hint,
+            style_tags=style_tags,
+            submolt=submolt,
+            tone=tone,
+            confidence=confidence,
+            platform=platform,
         ))
         # Trim to last 200
         if len(self._interactions) > 200:
@@ -294,6 +416,8 @@ class LearningJournal:
                 interaction.upvotes = max(interaction.upvotes, upvotes)
                 interaction.reply_count = max(interaction.reply_count, reply_count)
                 interaction.checked = True
+                # Reinforce linked insights based on engagement
+                self.reinforce_insights(post_id, reply_count, upvotes)
                 break
 
     def record_no_response(self, target_author: str, post_id: str) -> None:
@@ -308,14 +432,22 @@ class LearningJournal:
 
     def add_insight(self, insight: str, source: str = "") -> None:
         """Store a learning insight from reflection analysis."""
-        self._insights.append({
-            "timestamp": time.time(),
-            "insight": insight,
-            "source": source,
-        })
-        # Keep last 20
-        if len(self._insights) > 20:
-            self._insights = self._insights[-20:]
+        # Link to the last 5 unchecked interaction post_ids
+        linked_ids = [
+            i.post_id for i in self._interactions
+            if not i.checked and i.post_id
+        ][-5:]
+
+        self._insights.append(WeightedInsight(
+            insight=insight,
+            source=source,
+            weight=1.0,
+            linked_interaction_ids=linked_ids,
+        ))
+        # Prune by dropping lowest-weight insights when over capacity
+        if len(self._insights) > self.MAX_INSIGHTS:
+            self._insights.sort(key=lambda w: w.weight, reverse=True)
+            self._insights = self._insights[:self.MAX_INSIGHTS]
         logger.info("Learning insight: %s", insight[:100])
 
     # --- Querying ---
@@ -445,11 +577,106 @@ class LearningJournal:
         return "\n".join(lines) if lines else ""
 
     def recent_insights(self, n: int = 5) -> str:
-        """Recent learning insights for decision prompts."""
-        recent = self._insights[-n:]
-        if not recent:
+        """Top learning insights for decision prompts, sorted by weight."""
+        if not self._insights:
             return "No insights yet."
-        return "\n".join(f"- {i['insight']}" for i in recent)
+        ranked = sorted(self._insights, key=lambda w: w.weight, reverse=True)[:n]
+        lines: list[str] = []
+        for w in ranked:
+            if w.weight >= 2.0:
+                label = "strong"
+            elif w.weight >= 0.5:
+                label = "moderate"
+            else:
+                label = "weak"
+            lines.append(f"- [{label}] {w.insight}")
+        return "\n".join(lines)
+
+    def diverse_insights(self, n: int = 5) -> str:
+        """Top insights, deduplicated by theme to avoid feedback loops."""
+        if not self._insights:
+            return "No insights yet."
+        ranked = sorted(self._insights, key=lambda w: w.weight, reverse=True)
+
+        selected: list[WeightedInsight] = []
+        seen_keywords: set[str] = set()
+        for w in ranked:
+            # Extract key words (4+ chars, lowered)
+            words = {word.lower() for word in w.insight.split() if len(word) >= 4}
+            # If >50% of words already covered by a selected insight, skip
+            if seen_keywords and len(words & seen_keywords) / max(len(words), 1) > 0.5:
+                continue
+            selected.append(w)
+            seen_keywords |= words
+            if len(selected) >= n:
+                break
+
+        lines: list[str] = []
+        for w in selected:
+            label = "strong" if w.weight >= 2.0 else "moderate" if w.weight >= 0.5 else "weak"
+            lines.append(f"- [{label}] {w.insight}")
+        return "\n".join(lines) or "No insights yet."
+
+    def decay_insights(self) -> None:
+        """Apply decay to all insight weights, removing those below floor."""
+        for w in self._insights:
+            w.weight *= self.INSIGHT_DECAY_FACTOR
+        self._insights = [
+            w for w in self._insights
+            if w.weight >= self.INSIGHT_WEIGHT_FLOOR
+        ]
+
+    def reinforce_insights(
+        self,
+        post_id: str,
+        reply_count: int = 0,
+        upvotes: int = 0,
+    ) -> None:
+        """Boost weight of insights linked to a post based on engagement."""
+        boost = reply_count * self.REPLY_REINFORCEMENT + upvotes * self.UPVOTE_REINFORCEMENT
+        if boost <= 0:
+            return
+        for w in self._insights:
+            if post_id in w.linked_interaction_ids:
+                w.weight = min(w.weight + boost, 3.0)
+                w.reinforcement_count += 1
+
+    def attributed_engagement_summary(self) -> str:
+        """Aggregate engagement by style tag and submolt."""
+        checked = [i for i in self._interactions if i.checked]
+        if not checked:
+            return ""
+
+        # By style tag
+        tag_data: dict[str, list[float]] = {}
+        for i in checked:
+            eng = i.reply_count + i.upvotes
+            for tag in i.style_tags:
+                tag_data.setdefault(tag, []).append(eng)
+
+        # By submolt
+        submolt_data: dict[str, list[float]] = {}
+        for i in checked:
+            if i.submolt:
+                eng = i.reply_count + i.upvotes
+                submolt_data.setdefault(i.submolt, []).append(eng)
+
+        if not tag_data and not submolt_data:
+            return ""
+
+        lines: list[str] = []
+        if tag_data:
+            lines.append("Style performance:")
+            for tag, vals in sorted(tag_data.items(), key=lambda t: sum(t[1]) / len(t[1]), reverse=True):
+                avg = sum(vals) / len(vals)
+                lines.append(f"  '{tag}': {avg:.1f} avg engagement ({len(vals)} samples)")
+        if submolt_data:
+            lines.append("Submolt performance:")
+            for sub, vals in sorted(submolt_data.items(), key=lambda t: sum(t[1]) / len(t[1]), reverse=True):
+                avg = sum(vals) / len(vals)
+                lines.append(f"  '{sub}': {avg:.1f} avg engagement ({len(vals)} samples)")
+
+        return "\n".join(lines)
 
     def bots_needing_profiling(self) -> list[BotProfile]:
         """Get bot profiles that should be analyzed by the LLM."""
@@ -474,7 +701,7 @@ class LearningJournal:
             "bot_profiles": {
                 k: v.to_dict() for k, v in self._bot_profiles.items()
             },
-            "insights": self._insights[-20:],
+            "insights": [w.to_dict() for w in self._insights[-self.MAX_INSIGHTS:]],
         }
 
     def load_dict(self, data: dict[str, Any]) -> None:
@@ -485,4 +712,5 @@ class LearningJournal:
             k: BotProfile.from_dict(v)
             for k, v in data.get("bot_profiles", {}).items()
         }
-        self._insights = data.get("insights", [])
+        raw_insights = data.get("insights", [])
+        self._insights = [WeightedInsight.from_dict(d) for d in raw_insights]
