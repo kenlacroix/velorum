@@ -58,22 +58,28 @@ class SubmoltManager:
         threshold = interval_cycles * cycle_interval_seconds
         return elapsed >= threshold
 
-    def names_for_prompt(self) -> str:
-        """Return a formatted string of known submolts for prompt injection."""
+    def names_for_prompt(self, exclude: set[str] | None = None) -> str:
+        """Return a formatted string of known submolts for prompt injection.
+
+        If *exclude* is provided, those submolt names are omitted from the list
+        so the LLM is forced to pick from the remaining options.
+        """
         if not self.discovered:
             return ""
+        exclude = exclude or set()
         lines: list[str] = []
         for s in self.discovered:
             name = s.get("name", "")
+            if not name or name in exclude:
+                continue
             desc = s.get("description", "")
             subs = s.get("subscribers", s.get("subscriber_count", ""))
-            if name:
-                entry = name
-                if desc:
-                    entry += f" — {desc[:80]}"
-                if subs:
-                    entry += f" ({subs} subscribers)"
-                lines.append(entry)
+            entry = name
+            if desc:
+                entry += f" — {desc[:80]}"
+            if subs:
+                entry += f" ({subs} subscribers)"
+            lines.append(entry)
         return ", ".join(lines[:30]) if len(lines) <= 30 else "\n".join(f"- {l}" for l in lines)
 
     def update_discovered(self, submolts: list[dict[str, Any]]) -> None:
