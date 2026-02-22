@@ -112,9 +112,11 @@ class StatsPanel(Container):
             "Waiting": "[dim]\u25cb[/]",
             "Error": "[red]\u2717[/]",
         }.get(status, "\u25cf")
-        self.query_one("#stat-status", Static).update(
-            f"  {marker} [{color}]{status}[/]"
-        )
+        if color:
+            label = f"[{color}]{status}[/]"
+        else:
+            label = status
+        self.query_one("#stat-status", Static).update(f"  {marker} {label}")
         # Clear ban display when not banned
         if status != "Banned":
             self.query_one("#stat-ban", Static).update("")
