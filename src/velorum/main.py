@@ -1743,7 +1743,9 @@ async def main() -> None:
         if plan:
             c.missions.apply_plan(plan)
 
-    cycle = 0
+    cycle = c.memory.total_cycle  # resume from persisted lifetime cycle count
+    if cycle > 0:
+        logger.info("Resuming from lifetime cycle %d", cycle)
     try:
         # Build task list — Moltbook cycle + optional Arena loop
         async def moltbook_loop() -> None:
@@ -1780,6 +1782,7 @@ async def main() -> None:
                     logger.info("API recovered — resuming normal operation")
 
                 cycle += 1
+                c.memory.total_cycle = cycle
                 logger.info("=== Cycle %d ===", cycle)
 
                 try:

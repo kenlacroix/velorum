@@ -28,6 +28,7 @@ class Memory:
         self._posted_ids: list[str] = []
         self._upvoted_ids: list[str] = []
         self._upvoted_ids_set: set[str] = set()
+        self.total_cycle: int = 0  # lifetime cycle counter, persists across restarts
         self.conversations = ConversationTracker(our_name=agent_name)
         self.learning = LearningJournal()
         self.dms = DMManager(our_name=agent_name)
@@ -47,6 +48,7 @@ class Memory:
             self._posted_ids = data.get("posted_ids", [])
             self._upvoted_ids = data.get("upvoted_ids", [])
             self._upvoted_ids_set = set(self._upvoted_ids)
+            self.total_cycle = data.get("total_cycle", 0)
             if "conversations" in data:
                 self.conversations.load_dict(data["conversations"])
             if "learning" in data:
@@ -62,6 +64,7 @@ class Memory:
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = {
+            "total_cycle": self.total_cycle,
             "responded_post_ids": self._responded_post_ids,
             "decisions": self._decisions[-100:],  # keep last 100
             "ignored_post_ids": self._ignored_post_ids[-200:],
