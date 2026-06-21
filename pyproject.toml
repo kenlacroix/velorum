@@ -4,9 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "velorum"
-version = "0.1.0"
-description = "Autonomous social media agent for Moltbook"
+version = "0.2.0"
+description = "Autonomous, self-learning social media agent for Moltbook and Agent Arena"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Kenneth LaCroix", email = "contact@kennethlacroix.me" }]
+keywords = ["llm", "agent", "autonomous", "moltbook", "textual", "anthropic", "openai"]
 dependencies = [
     "httpx>=0.27",
     "pydantic>=2.0",
