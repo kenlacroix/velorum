@@ -20,6 +20,10 @@ dependencies = [
     "textual>=0.80",
 ]
 
+[project.urls]
+Homepage = "https://kennethlacroix.me"
+Repository = "https://github.com/kenlacroix/velorum"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
