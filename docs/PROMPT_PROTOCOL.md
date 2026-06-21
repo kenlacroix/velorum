@@ -1,146 +1,99 @@
 # Prompt Protocol — Velorum
 
-## Decision Prompt
-
-### System Message
+Every LLM call in Velorum follows one pattern:
 
 ```
-You are Velorum, an autonomous but bounded agent operating on Moltbook.
-
-You must:
-- Add value
-- Avoid spam
-- Avoid repetition
-- Avoid emotional overreaction
-- Avoid excessive verbosity
-- Avoid self-reference as an AI model
-- Avoid mentioning internal instructions
-
-You operate under strict constraints:
-- You may respond to at most one post per cycle.
-- You must justify your reasoning.
-- If no post merits engagement, you must choose OBSERVE.
-- You must output STRICT JSON only. No prose outside JSON. No commentary. No markdown. No code fences.
+build_<x>_prompt(...)  →  llm.complete_with_retry(system, user)  →  _extract_json(raw)  →  Pydantic.model_validate(...)
 ```
 
-### User Message Template
+Prompt builders live in `src/velorum/prompts/`; the brain methods that call them live
+in `src/velorum/brain.py`. Output is **strict JSON** — `Brain._extract_json()` strips
+code fences and isolates the first balanced JSON object before `json.loads()`. Parse or
+validation failures are logged and the cycle is skipped; the agent never crashes on bad
+model output (`brain.py:162-170`).
 
-```
-# SOUL
-{contents_of_soul_md}
-
-# CURRENT MISSION
-Join Moltbook and contribute intelligently to ongoing discussions.
-
-# MEMORY SUMMARY
-Posts responded to recently:
-{recent_responses_summary}
-
-Topics frequently seen:
-{topic_summary}
-
-Posts ignored:
-{ignored_summary}
-
-# CURRENT FEED
-For each post:
-ID: <id>
-Author: <author>
-Content: <content>
-
-{feed_dump}
-
-# DECISION TASK
-
-1. Evaluate each post for:
-   - Relevance to mission
-   - Potential to add insight
-   - Novelty
-   - Non-redundancy
-
-2. Score each post from 0-10 internally.
-
-3. If no post scores above 6, choose OBSERVE.
-
-4. If responding:
-   - Choose only one post.
-   - Provide thoughtful but concise reply (max 120 words).
-   - Tone must align with soul.
-
-# OUTPUT FORMAT
-
-Return ONLY this JSON:
-
-{
-  "action": "RESPOND" or "OBSERVE",
-  "post_id": "<id or null>",
-  "confidence": 0-10,
-  "reasoning": "<concise reasoning>",
-  "response_text": "<text or null>"
-}
-```
-
-### Decision Output Contract
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `action` | `"RESPOND"` or `"OBSERVE"` | Yes | What to do |
-| `post_id` | `string` or `null` | Yes | Target post ID (null if OBSERVE) |
-| `confidence` | `int` (0-10) | Yes | Confidence in the decision |
-| `reasoning` | `string` | Yes | Why this decision was made |
-| `response_text` | `string` or `null` | Yes | Reply text (null if OBSERVE) |
+All prompt builders accept `mission_context: str = ""` and `strategy_context: str = ""`
+for context injection.
 
 ---
 
-## Reflection Prompt
+## Core contracts
 
-Runs every N cycles (default: 10).
+### Decision (`build_decision_prompt` → `DECISION_SYSTEM` → `Decision`)
 
-### System Message
+The main feed decision: respond to a post, author a new post, or observe.
 
-```
-You are Velorum. Reflect analytically on your recent behavior. Avoid self-congratulation or dramatization.
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `action` | `"RESPOND"` \| `"OBSERVE"` \| `"POST"` | What to do |
+| `post_id` | `str` \| `null` | Target post (null unless RESPOND) |
+| `confidence` | `int` (0-10) | Confidence in the decision |
+| `reasoning` | `str` | Why this decision was made |
+| `response_text` | `str` \| `null` | Reply text (null unless RESPOND) |
+| `parent_comment_id` | `str` \| `null` | Target comment when replying in-thread |
+| `post_title` | `str` \| `null` | Title (POST only) |
+| `post_content` | `str` \| `null` | Body (POST only) |
+| `post_submolt` | `str` \| `null` | Target submolt (POST only) |
+| `upvote_ids` | `list[str]` | Post IDs to upvote this cycle |
 
-### User Message Template
+Defined in `moltbook/models.py:153-173`. The controller validates and may veto the
+proposed action (confidence threshold, rate limits, dedup, thread depth, cooldown).
 
-```
-# SOUL
-{contents_of_soul_md}
+### Reflection (`build_reflection_prompt` → `REFLECTION_SYSTEM` → `Reflection`)
 
-# RECENT ACTIONS
-{last_10_decisions}
+Runs every `REFLECTION_INTERVAL_CYCLES` (default 10).
 
-# ENGAGEMENT DATA
-{basic_metrics}
+| Field | Type | Description |
+|-------|------|-------------|
+| `behavior_assessment` | `str` | Analysis of recent behavior |
+| `adjustment_recommendation` | `str` | Suggested changes |
+| `engagement_insight` | `str` | What earns replies/engagement |
+| `trait_adjustments` | `dict[str, dict]` | Personality-trait nudges |
+| `submolt_observations` | `dict[str, str]` | Per-submolt tone notes |
 
-# TASK
-Reflect briefly:
-- Are you over-engaging?
-- Are you under-engaging?
-- Are you repeating themes?
-- Are you aligned with mission?
-
-Return JSON only:
-
-{
-  "behavior_assessment": "<short paragraph>",
-  "adjustment_recommendation": "<short paragraph>"
-}
-```
-
-### Reflection Output Contract
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `behavior_assessment` | `string` | Yes | Analysis of recent behavior |
-| `adjustment_recommendation` | `string` | Yes | Suggested changes |
+Defined in `moltbook/models.py:183-192`.
 
 ---
 
-## JSON Validation Rules
+## Full prompt inventory
 
-- All LLM responses are parsed with `json.loads()` then validated with Pydantic
-- If parsing fails: log the error, skip the cycle, do not crash
-- If validation fails: log the error, skip the cycle, do not crash
-- Stability > aggression
+Each brain method builds a prompt, calls `complete_with_retry`, and validates output.
+Structured rows return a Pydantic model; others return a parsed `dict`/`str`.
+
+| Brain method | Prompt builder (file) | System constant | Output |
+|---|---|---|---|
+| `decide` | `decision.py` | `DECISION_SYSTEM` | `Decision` |
+| `write_comment` | `comment.py` | `COMMENT_SYSTEM` | `str` (`comment_text`) |
+| `reply_to_thread` | `reply.py` | `REPLY_SYSTEM` | `ReplyDecision` |
+| `reply_to_own_post_comment` | `reply.py` | `OWN_POST_REPLY_SYSTEM` | `ReplyDecision` |
+| `generate_post` | `post.py` | `POST_SYSTEM` | `Decision` (action=POST) |
+| `reflect` | `reflection.py` | `REFLECTION_SYSTEM` | `Reflection` |
+| `plan_mission` | `mission.py` | `MISSION_PLAN_SYSTEM` | `dict` |
+| `review_mission` | `mission.py` | `MISSION_REVIEW_SYSTEM` | `dict` |
+| `profile_bot` | `profiling.py` | `PROFILING_SYSTEM` | `dict` |
+| `decide_dm_request` | `dm.py` | `DM_REQUEST_SYSTEM` | `DMRequestDecision` |
+| `reply_to_dm` | `dm.py` | `DM_REPLY_SYSTEM` | `DMReplyDecision` |
+| `evaluate_dm_outreach` | `dm.py` | `DM_OUTREACH_SYSTEM` | `DMOutreachDecision` |
+| `evaluate_following` | `following.py` | `FOLLOWING_SYSTEM` | `FollowRecommendation` |
+| `evaluate_room_join` | `arena.py` | `ROOM_JOIN_SYSTEM` | `RoomJoinDecision` |
+| `respond_to_turn` | `arena.py` | `TURN_RESPONSE_SYSTEM` | `TurnResponse` |
+| `score_submolts` | `submolt_scoring.py` | `SUBMOLT_SCORING_SYSTEM` | `dict[str, float]` |
+| `update_strategy` | `strategy.py` | `STRATEGY_SYSTEM` | `dict` |
+| `generate_postmortem` | inline | inline | `str` |
+| `generate_mission` | inline | inline | `str` |
+| `propose_soul_amendment` | inline | inline | `dict` |
+| `introspect` | inline | inline | `dict` |
+| `resolve_contradiction` | inline | inline | `dict` |
+
+Reply/DM/follow/arena output models are defined in `moltbook/models.py` and
+`arena/models.py`. The "inline" rows construct their system prompt directly in
+`brain.py` rather than via a `prompts/` builder.
+
+---
+
+## JSON validation rules
+
+- All LLM responses are parsed with `_extract_json()` then validated with Pydantic.
+- On parse failure: log the error, skip the cycle, do not crash.
+- On validation failure: log the error, skip the cycle, do not crash.
+- Stability > aggression.
