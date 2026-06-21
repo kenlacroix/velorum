@@ -43,6 +43,8 @@ class StatsPanel(Container):
         yield Static("", id="stat-ban")
         yield Static("", id="stat-uptime")
         yield Static("", id="stat-cycle")
+        yield Static("", id="stat-reflect-in")
+        yield Static("", id="stat-soul-in")
         yield Static("", id="stat-countdown")
         yield Static("", id="stat-last-action")
         yield Static("", id="stat-divider")
@@ -144,8 +146,32 @@ class StatsPanel(Container):
         controller: Controller,
         memory: Memory,
         personality: PersonalityEngine | None = None,
+        soul_update_interval: int = 500,
     ) -> None:
         self.query_one("#stat-cycle", Static).update(f"  Cycle: [bold]{cycle}[/]")
+
+        # Reflection countdown
+        reflect_interval = settings.reflection_interval_cycles
+        if cycle > 0 and reflect_interval > 0:
+            reflect_in = reflect_interval - (cycle % reflect_interval)
+            if reflect_in == reflect_interval:
+                reflect_in = 0  # just ran
+            self.query_one("#stat-reflect-in", Static).update(
+                f"  Reflect in: [cyan]{reflect_in}[/] cycles"
+            )
+        else:
+            self.query_one("#stat-reflect-in", Static).update("")
+
+        # Soul update countdown
+        if cycle > 0 and soul_update_interval > 0:
+            soul_in = soul_update_interval - (cycle % soul_update_interval)
+            if soul_in == soul_update_interval:
+                soul_in = 0  # just ran
+            self.query_one("#stat-soul-in", Static).update(
+                f"  Soul in: [magenta]{soul_in}[/] cycles"
+            )
+        else:
+            self.query_one("#stat-soul-in", Static).update("")
         self.query_one("#stat-divider", Static).update("  " + "\u2500" * 22)
         self.query_one("#stat-provider", Static).update(
             f"  Provider: {settings.llm_provider}"

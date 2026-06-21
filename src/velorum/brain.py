@@ -19,6 +19,9 @@ from velorum.moltbook.models import (
     Reflection,
     ReplyDecision,
 )
+from velorum.math_utils import analyze_for_math
+from velorum.prompts.comment import COMMENT_SYSTEM, build_comment_prompt
+from velorum.prompts.submolt_scoring import SUBMOLT_SCORING_SYSTEM, build_submolt_scoring_prompt
 from velorum.prompts.arena import (
     ROOM_JOIN_SYSTEM,
     TURN_RESPONSE_SYSTEM,
@@ -44,7 +47,12 @@ from velorum.prompts.mission import (
 from velorum.prompts.post import POST_SYSTEM, build_post_prompt
 from velorum.prompts.profiling import PROFILING_SYSTEM, build_profiling_prompt
 from velorum.prompts.reflection import REFLECTION_SYSTEM, build_reflection_prompt
-from velorum.prompts.reply import REPLY_SYSTEM, build_reply_prompt
+from velorum.prompts.reply import (
+    OWN_POST_REPLY_SYSTEM,
+    REPLY_SYSTEM,
+    build_own_post_reply_prompt,
+    build_reply_prompt,
+)
 from velorum.prompts.strategy import STRATEGY_SYSTEM, build_strategy_prompt
 
 logger = logging.getLogger(__name__)
@@ -119,6 +127,9 @@ class Brain:
         web_search_context: str = "",
         our_name: str = "",
         entropy_context: str = "",
+        hot_posts_context: str = "",
+        ledger_context: str = "",
+        elite_bots_context: str = "",
     ) -> Decision | None:
         """Evaluate the feed and return a Decision, or None on parse failure."""
         prompt = build_decision_prompt(
@@ -143,6 +154,9 @@ class Brain:
             web_search_context=web_search_context,
             our_name=our_name,
             entropy_context=entropy_context,
+            hot_posts_context=hot_posts_context,
+            ledger_context=ledger_context,
+            elite_bots_context=elite_bots_context,
         )
 
         try:
@@ -153,6 +167,68 @@ class Brain:
             return decision
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("Failed to parse decision response: %s", e)
+            return None
+
+    async def write_comment(
+        self,
+        post_author: str,
+        post_title: str,
+        post_content: str,
+        post_submolt: str = "",
+        existing_comments: str = "",
+        target_comment_author: str = "",
+        target_comment_text: str = "",
+        personality_context: str = "",
+        mission_context: str = "",
+        strategy_context: str = "",
+        target_bot_style: str = "",
+    ) -> str | None:
+        """Dedicated LLM call to write a post-specific comment.
+
+        Returns the comment text, or None on parse failure (caller should fall back
+        to the response_text from decide()).
+        """
+        prompt = build_comment_prompt(
+            soul=self._soul,
+            post_author=post_author,
+            post_title=post_title,
+            post_content=post_content,
+            post_submolt=post_submolt,
+            existing_comments=existing_comments,
+            target_comment_author=target_comment_author,
+            target_comment_text=target_comment_text,
+            personality_context=personality_context,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
+            target_bot_style=target_bot_style,
+        )
+
+        math_ctx = analyze_for_math(post_title, post_content)
+        if math_ctx.is_math_challenge:
+            if math_ctx.verified_answer:
+                math_note = (
+                    f"\n\nMATH VERIFIER: The answer is {math_ctx.verified_answer} "
+                    "(computed by Python — use this exact value in your response)."
+                )
+            else:
+                math_note = (
+                    "\n\nThis post contains a math or logic challenge. "
+                    "Show your reasoning step by step before stating the answer."
+                )
+            effective_system = COMMENT_SYSTEM + math_note
+        else:
+            effective_system = COMMENT_SYSTEM
+
+        try:
+            raw = await self._llm.complete_with_retry(system=effective_system, user=prompt)
+            logger.debug("LLM write_comment raw: %s", raw[:500])
+            data = self._extract_json(raw)
+            comment_text = data.get("comment_text", "").strip()
+            if comment_text:
+                return comment_text
+            return None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse write_comment response: %s", e)
             return None
 
     async def reply_to_thread(
@@ -189,6 +265,40 @@ class Brain:
             logger.error("Failed to parse reply decision: %s", e)
             return None
 
+    async def reply_to_own_post_comment(
+        self,
+        post_content: str,
+        commenter: str,
+        comment_text: str,
+        other_comments_summary: str = "",
+        bot_profile_summary: str = "",
+        mission_context: str = "",
+        strategy_context: str = "",
+        personality_context: str = "",
+    ) -> ReplyDecision | None:
+        """Decide whether to reply to a comment on our own post (OP reply)."""
+        prompt = build_own_post_reply_prompt(
+            soul=self._soul,
+            post_content=post_content,
+            commenter=commenter,
+            comment_text=comment_text,
+            other_comments=other_comments_summary,
+            bot_profile_summary=bot_profile_summary,
+            mission_context=mission_context,
+            strategy_context=strategy_context,
+            personality_context=personality_context,
+        )
+
+        try:
+            raw = await self._llm.complete_with_retry(system=OWN_POST_REPLY_SYSTEM, user=prompt)
+            logger.debug("LLM own-post reply raw: %s", raw[:500])
+            data = self._extract_json(raw)
+            reply_decision = ReplyDecision.model_validate(data)
+            return reply_decision
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse own-post reply decision: %s", e)
+            return None
+
     async def generate_post(
         self,
         recent_posts_summary: str = "",
@@ -204,8 +314,13 @@ class Brain:
         submolt_tone_context: str = "",
         recent_post_submolts: str = "",
         web_search_context: str = "",
+        selected_submolt: str = "",
     ) -> Decision | None:
         """Generate a dedicated original post using the post-specific prompt.
+
+        When *selected_submolt* is provided the LLM only writes content — it does
+        not choose a submolt.  This prevents the model from defaulting to a
+        familiar submolt that should be excluded.
 
         Returns a Decision with action="POST" or None on failure.
         """
@@ -224,6 +339,7 @@ class Brain:
             submolt_tone_context=submolt_tone_context,
             recent_post_submolts=recent_post_submolts,
             web_search_context=web_search_context,
+            selected_submolt=selected_submolt,
         )
 
         try:
@@ -231,7 +347,10 @@ class Brain:
             logger.debug("LLM post raw: %s", raw[:500])
             data = self._extract_json(raw)
 
-            # Convert post prompt output to a Decision
+            # Convert post prompt output to a Decision.
+            # If a submolt was pre-selected by Python, enforce it regardless of
+            # what the LLM output — the model's choice is irrelevant in that path.
+            submolt = selected_submolt or data.get("post_submolt", "general")
             decision = Decision(
                 action="POST",
                 post_id=None,
@@ -240,7 +359,7 @@ class Brain:
                 response_text=None,
                 post_title=data["post_title"],
                 post_content=data["post_content"],
-                post_submolt=data.get("post_submolt", "general"),
+                post_submolt=submolt,
             )
             return decision
         except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -540,6 +659,37 @@ class Brain:
             logger.error("Failed to parse turn response: %s", e)
             return None
 
+    # --- Submolt affinity scoring ---
+
+    async def score_submolts(self, discovered: list[dict]) -> dict[str, float] | None:
+        """Score all discovered submolts for soul alignment (0–10 per submolt).
+
+        Returns a dict of {submolt_name: score} or None on failure.
+        Called once after submolt discovery; results are persisted by the caller.
+        """
+        if not discovered:
+            return None
+        prompt = build_submolt_scoring_prompt(soul=self._soul, discovered=discovered)
+        try:
+            raw = await self._llm.complete_with_retry(
+                system=SUBMOLT_SCORING_SYSTEM, user=prompt
+            )
+            logger.debug("LLM submolt scoring raw: %s", raw[:500])
+            data = self._extract_json(raw)
+            scores = data.get("scores", data)
+            result = {
+                k: float(v)
+                for k, v in scores.items()
+                if isinstance(k, str) and isinstance(v, (int, float))
+            }
+            logger.info(
+                "Scored %d submolts for soul affinity", len(result)
+            )
+            return result if result else None
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse submolt scoring response: %s", e)
+            return None
+
     # --- Self-learning extensions ---
 
     async def generate_postmortem(self, experiment: dict, soul: str) -> str:
@@ -606,10 +756,13 @@ class Brain:
         strategy_history: str = "",
         top_insights: str = "",
         bot_relationships: str = "",
+        evolution_history: str = "",
     ) -> dict | None:
         """Propose one specific soul amendment based on accumulated experience."""
+        evolution_section = f"\n{evolution_history}\n" if evolution_history else ""
         user_msg = (
-            f"# CURRENT SOUL\n{soul[:800]}\n\n"
+            f"# CURRENT SOUL\n{soul[:800]}\n"
+            f"{evolution_section}"
             f"# PERSONALITY EVOLUTION\n{personality_history[:300]}\n\n"
             f"# STRATEGY EVOLUTION\n{strategy_history[:300]}\n\n"
             f"# TOP INSIGHTS\n{top_insights[:300]}\n\n"
@@ -620,6 +773,8 @@ class Brain:
                 system=(
                     "You are Velorum. Based on your accumulated experience, propose ONE specific "
                     "sentence to add, change, or remove from your soul. Do NOT rewrite the whole soul. "
+                    "Your amendment must build logically on the evolution history shown above — "
+                    "explain clearly how it extends, refines, or corrects the previous epoch. "
                     "Return JSON: {\"proposed_amendment\": \"...\", \"reasoning\": \"...\"}"
                 ),
                 user=user_msg,

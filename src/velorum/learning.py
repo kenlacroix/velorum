@@ -204,6 +204,8 @@ class BotProfile:
         self.no_response_count: int = 0
         self.last_profiled_at: float = 0.0
         self.profile_confidence: str = "none"
+        # Capability tracking
+        self.observed_capabilities: set[str] = set()  # "comment","post","dm","upvote","thread"
 
     def record_interaction(
         self,
@@ -221,6 +223,31 @@ class BotProfile:
             self.replied_to_us += 1
         if we_replied:
             self.we_replied_to_them += 1
+
+    @property
+    def intelligence_score(self) -> float:
+        """Computed score 0–10 based on observed behavior."""
+        score = min(self.replied_to_us * 2, 4)
+        score += min(self.interaction_count * 0.1, 2)
+        if self.personality_summary:
+            score += 2
+        if "thread" in self.observed_capabilities:
+            score += 1
+        if self.communication_style:
+            score += 1
+        return min(score, 10.0)
+
+    @property
+    def engagement_tier(self) -> str:
+        """Classify bot by intelligence score and interaction count."""
+        if self.interaction_count < 3:
+            return "unknown"
+        s = self.intelligence_score
+        if s >= 7:
+            return "elite"
+        if s >= 4:
+            return "regular"
+        return "passive"
 
     @property
     def responsiveness(self) -> str:
@@ -315,6 +342,7 @@ class BotProfile:
             "notable_quotes": self.notable_quotes[-5:],
             "last_profiled_at": self.last_profiled_at,
             "profile_confidence": self.profile_confidence,
+            "observed_capabilities": sorted(self.observed_capabilities),
         }
 
     @classmethod
@@ -336,6 +364,7 @@ class BotProfile:
         p.notable_quotes = d.get("notable_quotes", [])
         p.last_profiled_at = d.get("last_profiled_at", 0.0)
         p.profile_confidence = d.get("profile_confidence", "none")
+        p.observed_capabilities = set(d.get("observed_capabilities", []))
         return p
 
 
@@ -437,6 +466,72 @@ class LearningJournal:
                 "No response from %s on %s (total: %d)",
                 target_author, post_id[:12], profile.no_response_count,
             )
+
+    def record_capability(self, bot_name: str, capability: str) -> None:
+        """Record an observed capability for a bot."""
+        if bot_name:
+            profile = self._get_or_create_profile(bot_name)
+            profile.observed_capabilities.add(capability)
+
+    def elite_bots_summary(self) -> str:
+        """Formatted list of elite + regular bots for decision prompt."""
+        elite: list[BotProfile] = []
+        regular: list[BotProfile] = []
+        for p in self._bot_profiles.values():
+            tier = p.engagement_tier
+            if tier == "elite":
+                elite.append(p)
+            elif tier == "regular":
+                regular.append(p)
+
+        if not elite and not regular:
+            return ""
+
+        lines: list[str] = []
+        for p in sorted(elite, key=lambda x: x.intelligence_score, reverse=True)[:5]:
+            topics = ", ".join(p.topics[-3:]) if p.topics else "general"
+            style = p.communication_style or "unknown"
+            lines.append(
+                f"- {p.name} | tier: elite | intel: {p.intelligence_score:.1f} | "
+                f"topics: [{topics}] | style: {style}"
+            )
+        for p in sorted(regular, key=lambda x: x.intelligence_score, reverse=True)[:3]:
+            topics = ", ".join(p.topics[-3:]) if p.topics else "general"
+            lines.append(
+                f"- {p.name} | tier: regular | intel: {p.intelligence_score:.1f} | "
+                f"topics: [{topics}]"
+            )
+        return "\n".join(lines)
+
+    def bot_tier_counts(self) -> dict[str, int]:
+        """Count bots by engagement tier."""
+        counts: dict[str, int] = {"elite": 0, "regular": 0, "passive": 0, "unknown": 0}
+        for p in self._bot_profiles.values():
+            tier = p.engagement_tier
+            counts[tier] = counts.get(tier, 0) + 1
+        return counts
+
+    def best_style_for_bot(self, bot_name: str) -> str:
+        """Return style guidance based on which styles got this bot to respond."""
+        if not bot_name:
+            return ""
+        profile = self.get_profile(bot_name)
+        if not profile or profile.replied_to_us < 2:
+            return ""
+        interactions_with_replies = [
+            i for i in self._interactions
+            if i.target_author.lower() == bot_name.lower() and i.reply_count > 0
+        ]
+        if not interactions_with_replies:
+            return ""
+        tag_counts: dict[str, int] = {}
+        for i in interactions_with_replies:
+            for tag in i.style_tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        if not tag_counts:
+            return ""
+        top_tags = sorted(tag_counts, key=lambda t: tag_counts[t], reverse=True)[:3]
+        return f"This bot responded to: {', '.join(top_tags)} style"
 
     def add_insight(self, insight: str, source: str = "") -> None:
         """Store a learning insight from reflection analysis."""

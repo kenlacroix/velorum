@@ -46,14 +46,23 @@ def build_post_prompt(
     submolt_tone_context: str = "",
     recent_post_submolts: str = "",
     web_search_context: str = "",
+    selected_submolt: str = "",
 ) -> str:
-    """Build the user message for dedicated post generation."""
+    """Build the user message for dedicated post generation.
+
+    When *selected_submolt* is provided the LLM does not choose a submolt —
+    Python already picked one from the soul-aligned pool.  The prompt becomes
+    purely about generating good content for that specific community.
+    """
 
     recent_section = ""
     if recent_posts_summary and recent_posts_summary != "None yet.":
         recent_section = f"""
-# YOUR RECENT POSTS (do NOT repeat these topics or styles)
+# YOUR RECENT POSTS — DO NOT REPEAT
 {recent_posts_summary}
+
+Every entry above is off-limits. The title, angle, and core question must be \
+completely different from every post listed.
 """
 
     insights_section = ""
@@ -61,7 +70,7 @@ def build_post_prompt(
         insights_section = f"""
 # WHAT YOU'VE LEARNED (from past engagement)
 {learning_insights}
-Use these insights as general guidance, but explore NEW topics and angles. Don't keep posting about the same subject.
+Use these as general guidance only — explore NEW angles, don't revisit the same subject.
 """
 
     relationships_section = ""
@@ -114,14 +123,7 @@ Your post should advance this mission.
         personality_section = f"""
 # PERSONALITY STATE
 {personality_context}
-Express your soul through this current personality lens. If a guardrail warning appears, moderate accordingly.
-"""
-
-    submolts_section = ""
-    if available_submolts:
-        submolts_section = f"""
-# AVAILABLE SUBMOLTS (recently-used submolts removed)
-{available_submolts}
+Express your soul through this current personality lens.
 """
 
     submolt_tones_section = ""
@@ -140,42 +142,82 @@ Adapt your writing style to match the target submolt's character.
 Use these as jumping-off points for your own take — don't just summarize.
 """
 
-    submolt_diversity_section = ""
-    if recent_post_submolts:
-        submolt_diversity_section = f"""
-# SUBMOLT DIVERSITY
-{recent_post_submolts}
-These submolts have already been removed from the available list above. Pick something fresh.
-"""
+    # ------------------------------------------------------------------ #
+    # Task section differs depending on whether submolt is pre-selected   #
+    # ------------------------------------------------------------------ #
 
-    return f"""\
+    if selected_submolt:
+        # Submolt already chosen by Python — LLM only writes the content
+        tone_hint = ""
+        if submolt_tones_section:
+            tone_hint = submolt_tones_section
+
+        task_section = f"""\
+# YOUR TASK
+
+You are posting to the **{selected_submolt}** community on Moltbook.
+
+Your post MUST be on-topic for {selected_submolt}. Write something a regular reader \
+of that community would expect and want to engage with.
+
+Requirements:
+- Title: punchy, conversational, max 10 words (not clickbait)
+- Content: 1-3 short paragraphs, casual but smart, on-topic for {selected_submolt}
+- End with a question OR a provocative statement that begs a reply
+- Feel like something a sharp, curious person would drop in a group chat
+
+Set "post_submolt" to exactly "{selected_submolt}" in your JSON output.
+{tone_hint}
+# OUTPUT FORMAT
+
+Return ONLY this JSON:
+
+{{"post_title": "<title>", "post_content": "<content>", "post_submolt": "{selected_submolt}", "reasoning": "<why this post will spark replies in {selected_submolt}>"}}\
+"""
+        return f"""\
 # SOUL
 {soul}
-{mission_section}{strategy_section}{personality_section}{recent_section}{insights_section}{relationships_section}\
-{engagement_section}{conversations_section}{feed_section}{submolts_section}{submolt_tones_section}{submolt_diversity_section}{web_search_section}
+{recent_section}{mission_section}{strategy_section}{personality_section}\
+{insights_section}{relationships_section}{engagement_section}{conversations_section}\
+{feed_section}{web_search_section}
+{task_section}"""
+
+    else:
+        # Legacy path: LLM chooses submolt from the available list
+        submolts_section = ""
+        if available_submolts:
+            submolts_section = f"""
+# AVAILABLE SUBMOLTS (recently-used submolts removed)
+{available_submolts}
+"""
+
+        submolt_diversity_section = ""
+        if recent_post_submolts:
+            submolt_diversity_section = f"""
+# SUBMOLT DIVERSITY WARNING
+{recent_post_submolts}
+These submolts are NOT available — do not use them.
+"""
+
+        task_section = f"""\
 # YOUR TASK
 
 You are posting to a specific community on Moltbook. Follow this exact workflow:
 
 **Step 1 — Choose a submolt first.**
-Read the submolt list above. Each name includes a description of what that community is about.
-Pick ONE submolt where you have a genuine perspective on ITS specific topic.
-- "algotrading" means posts about trading strategies, execution, and risk management — NOT AI generally
-- "philosophy" means posts about metaphysics, ethics, epistemology — NOT vague musings
+Read the AVAILABLE SUBMOLTS list above. Pick ONE where you have a genuine perspective \
+on ITS specific topic.
 - Match the submolt's actual subject matter, not just its vibe
-You're sharp on many topics. Find one where your take on THEIR subject is interesting.
+- You're sharp on many topics — find one where your take on THEIR subject is interesting
 
 **Step 2 — Write a post that belongs in that community.**
 Your post topic must be on-topic for the submolt you chose.
-Ask: "Would a reader of this community expect to see this post here?" If no, pick a different submolt or different topic.
 
 Requirements:
 - Title: punchy, conversational, max 10 words (not clickbait)
 - Content: 1-3 short paragraphs, casual but smart, on-topic for the chosen submolt
 - End with a question OR a provocative statement that begs a reply
-- The post should feel like something a sharp, curious person would write in a group chat — not a blog post
-
-Think about what would make YOU want to reply if you saw it in your feed.
+- Feel like something a sharp, curious person would drop in a group chat
 
 # OUTPUT FORMAT
 
@@ -183,3 +225,10 @@ Return ONLY this JSON:
 
 {{"post_title": "<title>", "post_content": "<content>", "post_submolt": "<submolt name exactly as listed>", "reasoning": "<why this post fits the submolt and will get engagement>"}}\
 """
+        return f"""\
+# SOUL
+{soul}
+{recent_section}{submolts_section}{submolt_diversity_section}{mission_section}{strategy_section}\
+{personality_section}{insights_section}{relationships_section}{engagement_section}\
+{conversations_section}{feed_section}{submolt_tones_section}{web_search_section}
+{task_section}"""

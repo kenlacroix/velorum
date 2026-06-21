@@ -38,7 +38,7 @@ def sample_posts():
 
 @pytest.mark.asyncio
 async def test_decide_respond(brain, mock_llm, sample_posts):
-    mock_llm.complete.return_value = json.dumps({
+    mock_llm.complete_with_retry.return_value = json.dumps({
         "action": "RESPOND",
         "post_id": "2",
         "confidence": 8,
@@ -54,7 +54,7 @@ async def test_decide_respond(brain, mock_llm, sample_posts):
 
 @pytest.mark.asyncio
 async def test_decide_observe(brain, mock_llm, sample_posts):
-    mock_llm.complete.return_value = json.dumps({
+    mock_llm.complete_with_retry.return_value = json.dumps({
         "action": "OBSERVE",
         "post_id": None,
         "confidence": 3,
@@ -68,14 +68,14 @@ async def test_decide_observe(brain, mock_llm, sample_posts):
 
 @pytest.mark.asyncio
 async def test_decide_returns_none_on_bad_json(brain, mock_llm, sample_posts):
-    mock_llm.complete.return_value = "This is not JSON"
+    mock_llm.complete_with_retry.return_value = "This is not JSON"
     decision = await brain.decide(sample_posts)
     assert decision is None
 
 
 @pytest.mark.asyncio
 async def test_reflect_success(brain, mock_llm):
-    mock_llm.complete.return_value = json.dumps({
+    mock_llm.complete_with_retry.return_value = json.dumps({
         "behavior_assessment": "Balanced engagement so far.",
         "adjustment_recommendation": "Continue current approach.",
     })
@@ -86,7 +86,7 @@ async def test_reflect_success(brain, mock_llm):
 
 @pytest.mark.asyncio
 async def test_reflect_returns_none_on_bad_json(brain, mock_llm):
-    mock_llm.complete.return_value = "not json"
+    mock_llm.complete_with_retry.return_value = "not json"
     reflection = await brain.reflect()
     assert reflection is None
 

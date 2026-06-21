@@ -16,8 +16,9 @@ if TYPE_CHECKING:
     from velorum.memory import Memory
     from velorum.mission import MissionManager
     from velorum.moltbook.client import MoltbookClient
+    from velorum.orchestrator import CycleState
     from velorum.personality import PersonalityEngine
-    from velorum.soul import SoulProposalLog
+    from velorum.soul import SoulEvolutionLog, SoulProposalLog
     from velorum.strategy import StrategyEngine
     from velorum.submolts import SubmoltManager
 
@@ -41,4 +42,7 @@ class Components:
     arena_rooms: ArenaRoomTracker | None = None
     # Self-learning extensions
     soul_proposals: SoulProposalLog | None = None
+    soul_evolution: SoulEvolutionLog | None = None
     introspections: IntrospectionLog | None = None
+    # Orchestration state (shared between main loop and TUI)
+    cycle_state: CycleState | None = None

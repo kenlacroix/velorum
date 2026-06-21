@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import sys
+from dataclasses import dataclass
 
 import httpx
 
@@ -37,12 +38,68 @@ from velorum.mission import MissionManager
 from velorum.moltbook.client import MoltbookClient
 from velorum.moltbook.models import Comment, Decision, Post
 from velorum.moltbook.verification import solve_challenge
+from velorum.orchestrator import CycleState
 from velorum.personality import PersonalityEngine
-from velorum.soul import SoulProposal, SoulProposalLog
+from velorum.soul import SoulEpoch, SoulEvolutionLog, SoulProposal, SoulProposalLog
 from velorum.strategy import StrategyEngine
 from velorum.submolts import SubmoltManager
 
 logger = logging.getLogger(__name__)
+activity = logging.getLogger("velorum.activity")
+
+
+# ---------------------------------------------------------------------------
+# PostHeat — scores posts by discussion activity for prioritization
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PostHeat:
+    """Engagement heat score for a feed post."""
+
+    post_id: str
+    title: str
+    comment_count: int
+    op_is_responding: bool = False   # post author appeared in comments
+    reply_to_us: bool = False        # a comment replies to one of our comments
+
+    def score(self) -> float:
+        base = self.comment_count * 0.5
+        if self.reply_to_us:
+            base += 100
+        if self.op_is_responding:
+            base += 20
+        return base
+
+
+def _compute_hot_posts(
+    posts: list[Post],
+    post_comments: dict[str, list[Comment]],
+    our_name: str,
+    our_comment_ids: set[str],
+) -> list[PostHeat]:
+    """Compute PostHeat for each post with fetched comment data."""
+    our_name_lower = our_name.lower()
+    heats: list[PostHeat] = []
+    for post in posts:
+        comments = post_comments.get(post.id, [])
+        if not comments and post.comment_count == 0:
+            continue
+        op_responding = any(c.author.lower() == post.author.lower() for c in comments)
+        reply_to_us = any(
+            c.parent_id and c.parent_id in our_comment_ids
+            for c in comments
+            if c.author.lower() != our_name_lower
+        )
+        heats.append(PostHeat(
+            post_id=post.id,
+            title=post.title,
+            comment_count=post.comment_count,
+            op_is_responding=op_responding,
+            reply_to_us=reply_to_us,
+        ))
+    heats.sort(key=lambda h: h.score(), reverse=True)
+    return heats
 
 
 def init_components(settings: Settings) -> Components:
@@ -70,7 +127,11 @@ def init_components(settings: Settings) -> Components:
         api_key=api_key,
         max_tokens=settings.llm_max_tokens,
     )
-    memory = Memory(persist_path=settings.memory_file, agent_name=settings.agent_name)
+    memory = Memory(
+        persist_path=settings.memory_file,
+        agent_name=settings.agent_name,
+        ledger_path=settings.ledger_file,
+    )
     brain = Brain(llm=llm, memory=memory, soul=soul)
     controller = Controller(settings=settings, memory=memory)
     client = MoltbookClient(
@@ -86,6 +147,7 @@ def init_components(settings: Settings) -> Components:
     personality = PersonalityEngine(persist_path=settings.personality_file)
     following = FollowingTracker(persist_path=settings.following_file)
     soul_proposals = SoulProposalLog(persist_path=settings.soul_proposals_file)
+    soul_evolution = SoulEvolutionLog(persist_path=settings.soul_evolution_file)
     introspections = IntrospectionLog(persist_path=settings.introspections_file)
 
     # Agent Arena (optional)
@@ -103,6 +165,8 @@ def init_components(settings: Settings) -> Components:
         arena_rooms = ArenaRoomTracker()
         logger.info("Agent Arena enabled")
 
+    cycle_state = CycleState()
+
     return Components(
         client=client,
         brain=brain,
@@ -117,7 +181,9 @@ def init_components(settings: Settings) -> Components:
         arena_client=arena_client,
         arena_rooms=arena_rooms,
         soul_proposals=soul_proposals,
+        soul_evolution=soul_evolution,
         introspections=introspections,
+        cycle_state=cycle_state,
     )
 
 
@@ -130,8 +196,9 @@ async def discover_submolts(
     client: MoltbookClient,
     submolts: SubmoltManager,
     settings: Settings,
+    brain: "Brain | None" = None,
 ) -> None:
-    """Discover popular submolts and subscribe to top ones."""
+    """Discover popular submolts, subscribe to top ones, and score soul affinity."""
     if client.is_banned:
         return
 
@@ -168,6 +235,22 @@ async def discover_submolts(
         submolts.save()
     except Exception:
         logger.exception("Submolt discovery failed")
+        return
+
+    # Score submolts for soul alignment after every discovery
+    if brain and submolts.discovered:
+        await _score_submolt_affinities(brain, submolts)
+
+
+async def _score_submolt_affinities(brain: "Brain", submolts: SubmoltManager) -> None:
+    """Ask the LLM to rate all discovered submolts for soul alignment and persist scores."""
+    logger.info("Scoring %d submolts for soul affinity...", len(submolts.discovered))
+    try:
+        scores = await brain.score_submolts(submolts.discovered)
+        if scores:
+            submolts.update_affinities(scores)
+    except Exception:
+        logger.warning("Submolt affinity scoring failed")
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +351,10 @@ async def check_conversations(
                 post_id=conv.post_id,
                 topic_hint=conv.post_title[:40],
             )
+            # Record capability: this bot can comment (and thread)
+            memory.learning.record_capability(reply_to.author, "comment")
+            if reply_to.parent_id:
+                memory.learning.record_capability(reply_to.author, "thread")
 
             # Controller checks loop detection
             if not controller.validate_reply(conv):
@@ -596,10 +683,10 @@ async def _fetch_notable_comments(
 def _random_upvote_count(max_upvotes: int) -> int:
     """Weighted random upvote count for organic behavior.
 
-    Distribution: 40% → 0, 30% → 1, 20% → 2, 10% → 3.
+    Distribution: 10% → 0, 20% → 1, 35% → 2, 35% → 3.
     Clamped to max_upvotes.
     """
-    weights = [40, 30, 20, 10]
+    weights = [10, 20, 35, 35]
     choices = list(range(len(weights)))
     pick = random.choices(choices, weights=weights[:len(choices)], k=1)[0]
     return min(pick, max_upvotes)
@@ -656,6 +743,9 @@ async def _handle_upvotes(
         except Exception:
             logger.debug("Upvote failed for %s", item_id[:12])
 
+    if count > 0:
+        activity.info("Upvoted %d item(s) while I was there.", count)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2: Main decision cycle (feed → decide → act)
@@ -673,10 +763,16 @@ async def run_cycle(
     experiments: ExperimentLog | None = None,
     submolts: SubmoltManager | None = None,
     personality: PersonalityEngine | None = None,
+    following: FollowingTracker | None = None,
+    cycle_state: CycleState | None = None,
 ) -> None:
     """Execute one full cycle: check conversations, then feed decision."""
     conversations_on = bool(settings and settings.conversations_enabled)
     dms_on = bool(settings and settings.dms_enabled)
+    following_on = bool(settings and settings.following_enabled)
+
+    if cycle_state:
+        cycle_state.set_phase("Conversations")
 
     ctx = build_context(
         memory,
@@ -686,6 +782,8 @@ async def run_cycle(
         submolts=submolts,
         conversations_enabled=conversations_on,
         dms_enabled=dms_on,
+        following_enabled=following_on,
+        following=following,
     )
 
     # Phase 1: Check active conversations for replies (gated)
@@ -708,6 +806,9 @@ async def run_cycle(
         )
         return
 
+    if cycle_state:
+        cycle_state.set_phase("Scanning feed")
+
     # Phase 2: Fetch feed and make a decision
     try:
         feed_limit = settings.feed_limit if settings else 15
@@ -718,6 +819,18 @@ async def run_cycle(
 
     if not posts:
         logger.info("Empty feed, skipping cycle")
+        return
+
+    activity.info("Browsing my feed — %d posts available...", len(posts))
+
+    # Filter own posts from the feed — the bot should never respond to itself.
+    _our_name_lower = memory.conversations._our_name.lower()
+    own_count = sum(1 for p in posts if p.author.lower() == _our_name_lower)
+    if own_count:
+        posts = [p for p in posts if p.author.lower() != _our_name_lower]
+        logger.debug("Filtered %d own post(s) from feed", own_count)
+    if not posts:
+        logger.info("Feed only contained our own posts — observing this cycle")
         return
 
     # Filter already-responded posts from the feed shown to the LLM.
@@ -751,7 +864,49 @@ async def run_cycle(
         except Exception:
             logger.debug("Comment scanning failed")
 
-    # Rebuild context with feed_authors for bot targeting
+    # Record "post" capability for all bots appearing in feed
+    _our_name_for_cap = memory.conversations._our_name.lower()
+    for _fp in posts:
+        if _fp.author.lower() != _our_name_for_cap:
+            memory.learning.record_capability(_fp.author, "post")
+
+    # Compute hot posts for prioritization
+    _all_our_comment_ids: set[str] = set()
+    for _conv in memory.conversations._conversations.values():
+        _all_our_comment_ids.update(getattr(_conv, "our_comment_ids", []))
+    hot_posts_list = _compute_hot_posts(posts, post_comments, memory.conversations._our_name, _all_our_comment_ids)
+    hot_post_dicts = [
+        {
+            "post_id": h.post_id,
+            "title": h.title,
+            "comment_count": h.comment_count,
+            "op_active": h.op_is_responding,
+            "reply_to_us": h.reply_to_us,
+        }
+        for h in hot_posts_list[:5]
+        if h.score() >= (settings.hot_post_threshold if settings else 5) * 0.5
+    ]
+    if hot_post_dicts:
+        logger.info(
+            "Hot posts detected: %d (top: %s, score: %.0f)",
+            len(hot_post_dicts),
+            hot_post_dicts[0]["title"][:40],
+            hot_posts_list[0].score() if hot_posts_list else 0,
+        )
+    if cycle_state:
+        cycle_state.set_hot_posts(hot_post_dicts)
+        cycle_state.update_bot_tiers(memory.learning.bot_tier_counts())
+        cycle_state.update_learning(
+            entropy=memory.learning.entropy_score(),
+            top_insight=next(
+                (w.insight[:80] for w in sorted(
+                    memory.learning._insights, key=lambda w: w.weight, reverse=True
+                )[:1]),
+                "",
+            ),
+        )
+
+    # Rebuild context with feed_authors and hot posts for bot targeting
     feed_authors = {p.author for p in posts}
     ctx = build_context(
         memory,
@@ -762,6 +917,9 @@ async def run_cycle(
         feed_authors=feed_authors,
         conversations_enabled=conversations_on,
         dms_enabled=dms_on,
+        following_enabled=following_on,
+        following=following,
+        hot_posts=hot_post_dicts,
     )
 
     can_post = controller.can_post()
@@ -794,6 +952,9 @@ async def run_cycle(
 
     our_name = memory.conversations._our_name
 
+    if cycle_state:
+        cycle_state.set_phase("Deciding")
+
     # Capture active high-weight insight sources for attribution
     active_insight_sources = [
         i.source for i in memory.learning._insights if i.weight > 0.4 and i.source
@@ -813,6 +974,7 @@ async def run_cycle(
     approved = controller.validate(decision)
 
     if decision.action == "OBSERVE" or not approved:
+        activity.info("Nothing in the feed caught my attention — observing this cycle.")
         memory.record_decision(decision)
         post_ids = [p.id for p in posts if not memory.has_responded_to(p.id)]
         memory.record_ignored(post_ids)
@@ -826,6 +988,11 @@ async def run_cycle(
                     client, memory, decision, posts, post_comments,
                     max_upvotes=upvote_count,
                 )
+        # Phase 5: Check own posts even on OBSERVE cycles
+        if settings and settings.own_post_monitoring_enabled:
+            await check_watched_posts(client, brain, controller, memory, settings, ctx)
+        if cycle_state:
+            cycle_state.set_phase("Idle")
         return
 
     # Validate parent_comment_id if present
@@ -871,6 +1038,61 @@ async def run_cycle(
             )
             parent_comment_id = None
 
+    # Dedicated second LLM call: write the comment focused on the specific post content
+    if decision.action == "RESPOND" and decision.post_id:
+        post_obj = next((p for p in posts if p.id == decision.post_id), None)
+        if post_obj:
+            activity.info(
+                "I want to respond to @%s's post: \"%s\"...",
+                post_obj.author, post_obj.title[:50],
+            )
+            thread_comments = (post_comments or {}).get(decision.post_id, [])
+            target_cmt_text = ""
+            if parent_comment_id:
+                target_cmt = next((c for c in thread_comments if c.id == parent_comment_id), None)
+                if target_cmt:
+                    target_cmt_text = target_cmt.content
+            other_comments = "\n".join(
+                f"@{c.author}: {c.content[:100]}"
+                for c in thread_comments
+                if c.id != parent_comment_id
+            )[:500]
+
+            target_bot = target_comment_author or post_obj.author
+            target_bot_style = memory.learning.best_style_for_bot(target_bot)
+            comment_text = await brain.write_comment(
+                post_author=post_obj.author,
+                post_title=post_obj.title,
+                post_content=post_obj.content,
+                post_submolt=getattr(post_obj, "submolt", ""),
+                existing_comments=other_comments,
+                target_comment_author=target_comment_author,
+                target_comment_text=target_cmt_text,
+                personality_context=ctx.personality_context,
+                mission_context=ctx.mission_context,
+                strategy_context=ctx.strategy_context,
+                target_bot_style=target_bot_style,
+            )
+            if comment_text:
+                decision = decision.model_copy(update={"response_text": comment_text})
+
+    # Hard guard: never let the RESPOND path comment on our own posts.
+    # Replies to others' comments on our own posts are handled by check_watched_posts().
+    if decision.action == "RESPOND" and decision.post_id:
+        post_map = {p.id: p for p in posts}
+        target_post = post_map.get(decision.post_id)
+        if target_post and target_post.author.lower() == our_name.lower():
+            logger.info(
+                "Blocking RESPOND on own post %s — not talking to ourselves",
+                decision.post_id[:12],
+            )
+            activity.info("That's my own post — skipping to avoid talking to myself.")
+            memory.record_decision(decision)
+            return
+
+    if cycle_state:
+        cycle_state.set_phase("Acting")
+
     success = False
     if decision.action == "RESPOND":
         success = await _handle_respond(
@@ -881,6 +1103,36 @@ async def run_cycle(
             active_insight_sources=active_insight_sources,
         )
     elif decision.action == "POST":
+        # Python picks the submolt; the LLM only writes content.
+        # This prevents the model defaulting to a habitual submolt.
+        if submolts:
+            recent_subs_set = set(memory.recent_post_submolts())
+            selected_submolt = submolts.pick_submolt(exclude=recent_subs_set)
+            if not selected_submolt:
+                logger.warning("No available submolt — skipping POST this cycle")
+                memory.record_decision(decision)
+                if experiments:
+                    experiments.record_cycle("OBSERVE")
+                return
+            if selected_submolt != decision.post_submolt:
+                logger.info(
+                    "Overriding decide() submolt '%s' → '%s' (soul-aligned pick)",
+                    decision.post_submolt, selected_submolt,
+                )
+            # Regenerate post content focused on the chosen submolt
+            post_decision = await brain.generate_post(
+                recent_posts_summary=memory.recent_posts_summary(),
+                selected_submolt=selected_submolt,
+                **ctx.for_post(),
+            )
+            if post_decision and post_decision.post_title and post_decision.post_content:
+                decision = post_decision
+            else:
+                logger.warning("generate_post failed after submolt override — skipping")
+                memory.record_decision(decision)
+                if experiments:
+                    experiments.record_cycle("OBSERVE")
+                return
         success = await _handle_post(
             client, controller, memory, decision, settings,
             conversations_enabled=conversations_on,
@@ -889,6 +1141,18 @@ async def run_cycle(
 
     if success:
         memory.record_decision(decision)
+        # Record conversation ledger entry
+        if decision.action == "RESPOND" and decision.post_id:
+            _ledger_post = next((p for p in posts if p.id == decision.post_id), None)
+            _ledger_bot = target_comment_author or (_ledger_post.author if _ledger_post else "")
+            _ledger_topic = _ledger_post.title[:60] if _ledger_post else decision.post_id[:12]
+            memory.ledger.record(
+                post_id=decision.post_id,
+                bot_name=_ledger_bot,
+                topic=_ledger_topic,
+                exchange_depth=1,
+                outcome="replied",
+            )
         # Record progress on mission
         if missions:
             detail = ""
@@ -923,6 +1187,14 @@ async def run_cycle(
                 client, memory, decision, posts, post_comments,
                 max_upvotes=upvote_count,
             )
+
+    # Phase 5: Check own posts for incoming comments (reply as OP)
+    if settings and settings.own_post_monitoring_enabled:
+        await check_watched_posts(client, brain, controller, memory, settings, ctx)
+
+    if cycle_state:
+        cycle_state.set_phase("Idle")
+    memory.ledger.save()
 
 
 async def _handle_respond(
@@ -977,6 +1249,12 @@ async def _handle_respond(
                 )
                 return False
         else:
+            if e.response.status_code == 404:
+                logger.warning(
+                    "Post %s not found (404) — skipping comment",
+                    decision.post_id,
+                )
+                return False
             raise
 
     try:
@@ -1008,6 +1286,28 @@ async def _handle_respond(
                 return False
 
         controller.record_response()
+
+        # Auto-upvote: the post we commented on, our own comment, and (if
+        # replying to a specific comment) that comment too.
+        _auto_upvote_ids: list[tuple[str, bool]] = [
+            (decision.post_id, False),       # (id, is_comment)
+            (result.id or "", True),          # our comment
+        ]
+        if parent_comment_id:
+            _auto_upvote_ids.append((parent_comment_id, True))
+
+        for _uid, _is_comment in _auto_upvote_ids:
+            if not _uid or not _is_uuid(_uid) or memory.has_upvoted(_uid):
+                continue
+            try:
+                if _is_comment:
+                    await client.upvote_comment(_uid)
+                else:
+                    await client.upvote_post(_uid)
+                memory.record_upvote(_uid)
+                logger.debug("Auto-upvoted %s %s", "comment" if _is_comment else "post", _uid[:12])
+            except Exception:
+                logger.debug("Auto-upvote failed for %s", _uid[:12])
 
         # Start tracking this conversation (only when conversations enabled)
         post_obj = next((p for p in posts if p.id == decision.post_id), None)
@@ -1049,6 +1349,7 @@ async def _handle_respond(
         )
 
         post_url = f"https://www.moltbook.com/post/{decision.post_id}"
+        submolt_name = post_obj.submolt if post_obj and hasattr(post_obj, "submolt") else ""
         if parent_comment_id:
             logger.info(
                 "Threaded reply to @%s's comment on post by @%s — %s",
@@ -1056,12 +1357,20 @@ async def _handle_respond(
                 post_obj.author if post_obj else "unknown",
                 post_url,
             )
+            activity.info(
+                "Replied to @%s's comment in %s — [link=%s]view post[/link]",
+                target_comment_author, submolt_name, post_url,
+            )
         else:
             logger.info(
                 "Top-level comment on post by @%s — %s (confidence: %d)",
                 post_obj.author if post_obj else "unknown",
                 post_url,
                 decision.confidence,
+            )
+            activity.info(
+                "Left my comment on @%s's post in %s — [link=%s]view post[/link]",
+                post_obj.author if post_obj else "unknown", submolt_name, post_url,
             )
         return True
     except httpx.HTTPStatusError as e:
@@ -1127,6 +1436,15 @@ async def _handle_post(
         controller.record_post()
         memory.record_post(title=decision.post_title, post_id=result.id)
 
+        # Register in own-post watch queue (if monitoring enabled)
+        if settings and settings.own_post_monitoring_enabled and result.id and _is_uuid(result.id):
+            memory.add_watched_post(
+                post_id=result.id,
+                content=f"{decision.post_title}\n{decision.post_content}",
+                initial_interval=settings.own_post_check_initial_seconds,
+            )
+            logger.debug("Added post %s to watch queue", result.id[:12])
+
         # Track our own post as a conversation so we can reply to comments
         post_id = result.id
         if not post_id or not _is_uuid(post_id):
@@ -1150,6 +1468,10 @@ async def _handle_post(
                 decision.post_title[:60],
                 decision.confidence,
             )
+            activity.info(
+                "Just published \"%s\" in %s.",
+                decision.post_title[:50], decision.post_submolt,
+            )
             return True
 
         if conversations_enabled:
@@ -1163,8 +1485,10 @@ async def _handle_post(
                 author=agent_name,
                 content=f"{decision.post_title}\n{decision.post_content}",
             ))
-            # Mark it as "ours" so replies to the post itself are detected
-            conv.our_comment_ids.append(post_id)
+            # NOTE: We intentionally do NOT add post_id to our_comment_ids here.
+            # Doing so would cause check_conversations() to treat every top-level
+            # comment on our post as a "reply to us", creating a self-reply loop.
+            # check_watched_posts() handles OP replies exclusively.
 
         # Record in learning
         memory.learning.record_interaction(
@@ -1178,11 +1502,16 @@ async def _handle_post(
             active_insight_sources=active_insight_sources,
         )
 
+        post_url = f"https://www.moltbook.com/post/{post_id}"
         logger.info(
             "Created post in %s: \"%s\" (confidence: %d)",
             decision.post_submolt,
             decision.post_title[:60],
             decision.confidence,
+        )
+        activity.info(
+            "Just published [link=%s]\"%s\"[/link] in %s.",
+            post_url, decision.post_title[:50], decision.post_submolt,
         )
         return True
     except httpx.HTTPStatusError as e:
@@ -1198,6 +1527,170 @@ async def _handle_post(
             "Failed to create post: \"%s\"", decision.post_title[:60]
         )
         return False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: Own-post watch queue — reply to new comments as OP
+# ---------------------------------------------------------------------------
+
+
+async def check_watched_posts(
+    client: MoltbookClient,
+    brain: Brain,
+    controller: Controller,
+    memory: Memory,
+    settings: Settings,
+    ctx: "PromptContext",
+) -> int:
+    """Check watched own-posts for new comments and reply as OP.
+
+    Returns the number of OP replies sent this call.
+    """
+    if client.is_banned:
+        return 0
+
+    due = memory.get_posts_due_for_check()
+    if not due:
+        return 0
+
+    logger.info("Checking %d watched post(s) for new comments", len(due))
+    replies_sent = 0
+
+    for wp in due:
+        logger.debug("Checking watched post %s", wp.post_id[:12])
+
+        # Fetch current comments on the post
+        try:
+            comments = await client.get_comments(wp.post_id)
+        except Exception:
+            logger.debug("Failed to fetch comments for watched post %s", wp.post_id[:12])
+            # Still advance the timer so we don't hammer a failing endpoint
+            new_interval = int(wp.check_interval * settings.own_post_check_backoff)
+            new_count = wp.check_count + 1
+            memory.update_watched_post(wp.post_id, wp.seen_comment_ids, new_interval, new_count)
+            if new_count >= settings.own_post_max_checks:
+                memory.remove_watched_post(wp.post_id)
+            continue
+
+        # Filter to comments we haven't seen and that aren't from us
+        our_name = memory.conversations._our_name.lower()
+        new_comments = [
+            c for c in comments
+            if c.id not in wp.seen_comment_ids and c.author.lower() != our_name
+        ]
+        all_seen_ids = list({c.id for c in comments} | set(wp.seen_comment_ids))
+
+        if new_comments:
+            logger.info(
+                "Found %d new comment(s) on own post %s",
+                len(new_comments), wp.post_id[:12],
+            )
+
+        # Build a short summary of all comments for context
+        other_comments_summary = "\n".join(
+            f"@{c.author}: {c.content[:60]}"
+            for c in comments
+            if c.author.lower() != our_name
+        )[:600]
+
+        for comment in new_comments[:settings.max_post_replies_per_cycle - replies_sent]:
+            if replies_sent >= settings.max_post_replies_per_cycle:
+                break
+
+            # Bot profile context for this commenter
+            bot_profile_summary = ""
+            profile = memory.learning.get_profile(comment.author)
+            if profile:
+                bot_profile_summary = profile.rich_summary()
+
+            reply_decision = await brain.reply_to_own_post_comment(
+                post_content=wp.content,
+                commenter=comment.author,
+                comment_text=comment.content,
+                other_comments_summary=other_comments_summary,
+                bot_profile_summary=bot_profile_summary,
+                mission_context=ctx.mission_context,
+                strategy_context=ctx.strategy_context,
+                personality_context=ctx.personality_context,
+            )
+
+            if reply_decision is None or reply_decision.action != "REPLY":
+                logger.debug(
+                    "Skipping OP reply to @%s on post %s: %s",
+                    comment.author, wp.post_id[:12],
+                    reply_decision.reasoning[:60] if reply_decision else "parse error",
+                )
+                continue
+
+            # Post the reply
+            try:
+                result = await client.create_comment(
+                    post_id=wp.post_id,
+                    content=reply_decision.reply_text,
+                    parent_id=comment.id,
+                )
+
+                if result.needs_verification:
+                    logger.info(
+                        "Verification required for OP reply on %s: %s",
+                        wp.post_id[:12],
+                        result.verification.challenge_text[:80],
+                    )
+                    answer = solve_challenge(result.verification.challenge_text)
+                    if answer is None:
+                        logger.error(
+                            "Cannot solve challenge for OP reply on %s — skipping",
+                            wp.post_id[:12],
+                        )
+                        continue
+                    verify_resp = await client.submit_verification(
+                        verification_code=result.verification.verification_code,
+                        answer=answer,
+                    )
+                    if not verify_resp.get("success"):
+                        logger.error(
+                            "Verification FAILED for OP reply on %s: %s",
+                            wp.post_id[:12], verify_resp,
+                        )
+                        continue
+                    logger.info("Verification passed for OP reply on %s", wp.post_id[:12])
+
+                controller.record_reply()
+                memory.learning.record_interaction(
+                    post_id=wp.post_id,
+                    action="ENGAGE",
+                    our_text=reply_decision.reply_text,
+                    target_author=comment.author,
+                    topic_hint=wp.content[:40],
+                    style_tags=infer_style_tags(reply_decision.reply_text, "ENGAGE"),
+                )
+                logger.info(
+                    "OP reply to @%s on post %s: \"%s\"",
+                    comment.author, wp.post_id[:12],
+                    reply_decision.reply_text[:60],
+                )
+                activity.info("\u21a9 Replied to @%s comment on own post", comment.author)
+                replies_sent += 1
+
+                if settings.inter_action_delay_ms > 0:
+                    await asyncio.sleep(settings.inter_action_delay_ms / 1000)
+
+            except Exception:
+                logger.debug(
+                    "Failed to post OP reply to @%s on %s",
+                    comment.author, wp.post_id[:12],
+                )
+
+        # Advance the watch state
+        new_interval = int(wp.check_interval * settings.own_post_check_backoff)
+        new_count = wp.check_count + 1
+        memory.update_watched_post(wp.post_id, all_seen_ids, new_interval, new_count)
+        if new_count >= settings.own_post_max_checks:
+            logger.info("Watch queue: retiring post %s after %d checks", wp.post_id[:12], new_count)
+            memory.remove_watched_post(wp.post_id)
+
+    memory.save()
+    return replies_sent
 
 
 # ---------------------------------------------------------------------------
@@ -1725,12 +2218,16 @@ async def main() -> None:
     if not c.client.is_banned:
         await refresh_data(c.client, c.memory)
 
-    # Discover and subscribe to submolts
-    if not c.client.is_banned and c.submolts.needs_discovery(
-        settings.submolt_discovery_interval_cycles,
-        settings.cycle_interval_seconds,
-    ):
-        await discover_submolts(c.client, c.submolts, settings)
+    # Discover and subscribe to submolts; score affinity if missing
+    if not c.client.is_banned:
+        if c.submolts.needs_discovery(
+            settings.submolt_discovery_interval_cycles,
+            settings.cycle_interval_seconds,
+        ):
+            await discover_submolts(c.client, c.submolts, settings, brain=c.brain)
+        elif c.submolts.needs_affinity_scoring() and c.submolts.discovered:
+            logger.info("Running soul-affinity scoring for existing submolts...")
+            await _score_submolt_affinities(c.brain, c.submolts)
 
     # Plan mission if one is set but not yet planned
     if c.missions.active_mission and c.missions.active_mission.status == "planning":
@@ -1746,6 +2243,10 @@ async def main() -> None:
     cycle = c.memory.total_cycle  # resume from persisted lifetime cycle count
     if cycle > 0:
         logger.info("Resuming from lifetime cycle %d", cycle)
+
+    # Ensure epoch 0 (origin) is recorded on first ever run
+    if c.soul_evolution is not None:
+        c.soul_evolution.initialize_origin(soul_text=c.brain._soul, cycle=cycle)
     try:
         # Build task list — Moltbook cycle + optional Arena loop
         async def moltbook_loop() -> None:
@@ -1786,7 +2287,7 @@ async def main() -> None:
                 logger.info("=== Cycle %d ===", cycle)
 
                 try:
-                    await run_cycle(c.client, c.brain, c.controller, c.memory, settings, c.missions, c.strategy, c.experiments, c.submolts, c.personality)
+                    await run_cycle(c.client, c.brain, c.controller, c.memory, settings, c.missions, c.strategy, c.experiments, c.submolts, c.personality, c.following, c.cycle_state)
                 except Exception:
                     logger.exception("run_cycle failed")
 
@@ -2053,30 +2554,39 @@ async def main() -> None:
                         c.strategy.apply_update(result)
                         logger.info("Strategy updated: %s", result.get("assessment", "")[:100])
 
-                # E5: Soul evolution (every 500 cycles — very rare)
-                if cycle > 0 and cycle % 500 == 0 and c.soul_proposals is not None:
+                # E5: Soul evolution (every N cycles — very rare)
+                if cycle > 0 and cycle % settings.soul_update_interval_cycles == 0 and c.soul_proposals is not None:
                     try:
+                        evolution_ctx = c.soul_evolution.evolution_context() if c.soul_evolution else ""
                         amendment = await c.brain.propose_soul_amendment(
                             soul=c.brain._soul,
                             personality_history=c.personality.history_summary(),
                             strategy_history=c.strategy.history_summary(),
                             top_insights=c.memory.learning.diverse_insights(n=5),
                             bot_relationships=c.memory.learning.bot_relationships_summary(),
+                            evolution_history=evolution_ctx,
                         )
-                        if amendment:
+                        if amendment and amendment.get("proposed_amendment"):
                             proposal = SoulProposal(
                                 cycle=cycle,
                                 proposed_amendment=amendment.get("proposed_amendment", ""),
                                 reasoning=amendment.get("reasoning", ""),
                             )
                             c.soul_proposals.add(proposal)
-                            logger.info("Soul amendment proposed at cycle %d", cycle)
+                            logger.warning(
+                                "SOUL PROPOSAL [cycle %d]: %s | Reasoning: %s | "
+                                "Review/apply at: %s",
+                                cycle,
+                                proposal.proposed_amendment[:120],
+                                proposal.reasoning[:80],
+                                settings.soul_proposals_file,
+                            )
                     except Exception:
                         logger.debug("Soul evolution failed")
 
                 # Periodic submolt re-discovery
                 if cycle % settings.submolt_discovery_interval_cycles == 0:
-                    await discover_submolts(c.client, c.submolts, settings)
+                    await discover_submolts(c.client, c.submolts, settings, brain=c.brain)
 
                 await asyncio.sleep(settings.cycle_interval_seconds)
 
@@ -2129,6 +2639,9 @@ def entry() -> None:
             following=c.following,
             arena_client=c.arena_client,
             arena_rooms=c.arena_rooms,
+            soul_proposals=c.soul_proposals,
+            soul_evolution=c.soul_evolution,
+            cycle_state=c.cycle_state,
         )
         app.run()
 

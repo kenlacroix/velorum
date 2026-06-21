@@ -41,6 +41,9 @@ class PromptContext:
     web_search_context: str = ""
     entropy_context: str = ""
     introspection_context: str = ""
+    hot_posts_context: str = ""
+    ledger_context: str = ""
+    elite_bots_context: str = ""
 
     # --- Projection helpers -------------------------------------------------
 
@@ -58,6 +61,9 @@ class PromptContext:
             "recent_post_submolts": self.recent_post_submolts,
             "web_search_context": self.web_search_context,
             "entropy_context": self.entropy_context,
+            "hot_posts_context": self.hot_posts_context,
+            "ledger_context": self.ledger_context,
+            "elite_bots_context": self.elite_bots_context,
         }
 
     def for_reply(self) -> dict[str, str]:
@@ -132,6 +138,7 @@ def build_context(
     following: FollowingTracker | None = None,
     arena_enabled: bool = False,
     introspections: object | None = None,
+    hot_posts: list[dict] | None = None,
 ) -> PromptContext:
     """Build a ``PromptContext`` by calling each component's summary once."""
     engagement = memory.learning.engagement_summary()
@@ -167,11 +174,38 @@ def build_context(
     if introspections is not None and hasattr(introspections, "context_str"):
         introspection_context = introspections.context_str()
 
+    # Hot posts context
+    hot_posts_context = ""
+    if hot_posts:
+        lines: list[str] = []
+        for hp in hot_posts[:5]:
+            flags: list[str] = []
+            if hp.get("reply_to_us"):
+                flags.append("PRIORITY — someone replied to your comment")
+            if hp.get("op_active"):
+                flags.append("OP is active")
+            title = hp.get("title", "")[:60]
+            count = hp.get("comment_count", 0)
+            flag_str = " | ".join(flags)
+            if flag_str:
+                lines.append(f'- "{title}" — {count} comments [{flag_str}]')
+            else:
+                lines.append(f'- "{title}" — {count} comments')
+        hot_posts_context = "\n".join(lines)
+
+    # Ledger context
+    ledger_context = ""
+    if hasattr(memory, "ledger"):
+        ledger_context = memory.ledger.recent_context(n=5)
+
+    # Elite bots context
+    elite_bots_context = memory.learning.elite_bots_summary()
+
     return PromptContext(
         mission_context=missions.mission_context_for_prompt() if missions else "",
         strategy_context=strategy.summary_for_prompt() if strategy else "",
         personality_context=personality.summary_for_prompt() if personality else "",
-        available_submolts=submolts.names_for_prompt(exclude=recent_subs_set) if submolts else "",
+        available_submolts=submolts.names_for_prompt_sampled(n=5, exclude=recent_subs_set) if submolts else "",
         submolt_tone_context=submolts.all_tones_for_prompt() if submolts else "",
         learning_insights=memory.learning.diverse_insights(),
         engagement_summary=engagement,
@@ -185,4 +219,7 @@ def build_context(
         recent_post_submolts=recent_post_submolts,
         entropy_context=memory.learning.entropy_warning(),
         introspection_context=introspection_context,
+        hot_posts_context=hot_posts_context,
+        ledger_context=ledger_context,
+        elite_bots_context=elite_bots_context,
     )

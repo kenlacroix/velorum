@@ -2,23 +2,45 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
+import time
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from velorum.arena.rooms import ArenaRoomTracker
 from velorum.conversations import ConversationTracker
 from velorum.dm import DMManager
+from velorum.ledger import ConversationLedger
 from velorum.learning import LearningJournal
 from velorum.moltbook.models import Decision
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class WatchedPost:
+    """Tracks an own post for incoming comment monitoring (decaying backoff)."""
+
+    post_id: str
+    content: str              # "{title}\n{body}" for LLM context
+    posted_at: float          # unix timestamp
+    next_check_at: float      # unix timestamp of next check
+    check_interval: int       # current interval seconds (doubles each check)
+    check_count: int = 0
+    seen_comment_ids: list[str] = field(default_factory=list)
+
+
 class Memory:
-    def __init__(self, persist_path: Path, agent_name: str = "Velorum") -> None:
+    def __init__(
+        self,
+        persist_path: Path,
+        agent_name: str = "Velorum",
+        ledger_path: Path | None = None,
+    ) -> None:
         self._path = persist_path
         self._responded_post_ids: list[str] = []
         self._decisions: list[dict[str, Any]] = []
@@ -33,6 +55,8 @@ class Memory:
         self.learning = LearningJournal()
         self.dms = DMManager(our_name=agent_name)
         self.arena_rooms = ArenaRoomTracker()
+        self._watched_posts: dict[str, WatchedPost] = {}
+        self.ledger = ConversationLedger(persist_path=ledger_path)
         self._load()
 
     def _load(self) -> None:
@@ -57,6 +81,10 @@ class Memory:
                 self.dms.load_dict(data["dms"])
             if "arena_rooms" in data:
                 self.arena_rooms.load_dict(data["arena_rooms"])
+            if "watched_posts" in data:
+                for d in data["watched_posts"]:
+                    wp = WatchedPost(**d)
+                    self._watched_posts[wp.post_id] = wp
             logger.info("Memory loaded from %s", self._path)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load memory: %s", e)
@@ -76,6 +104,7 @@ class Memory:
             "learning": self.learning.to_dict(),
             "dms": self.dms.to_dict(),
             "arena_rooms": self.arena_rooms.to_dict(),
+            "watched_posts": [dataclasses.asdict(wp) for wp in self._watched_posts.values()],
         }
         self._path.write_text(json.dumps(data, indent=2))
 
@@ -128,15 +157,15 @@ class Memory:
         return "\n".join(lines)
 
     def recent_posts_summary(self, n: int = 10) -> str:
-        """Summary of recent original posts for dedup in prompts."""
+        """Summary of recent original posts for dedup in prompts, scanning all history."""
         recent = [
-            d for d in self._decisions[-30:]
+            d for d in reversed(self._decisions)
             if d.get("action") == "POST"
         ][:n]
         if not recent:
             return "None yet."
         lines = []
-        for d in recent:
+        for d in reversed(recent):
             title = d.get("post_title", "?")
             submolt = d.get("post_submolt", "?")
             lines.append(f"- [{submolt}] {title}")
@@ -201,14 +230,68 @@ class Memory:
     def decision_count(self) -> int:
         return len(self._decisions)
 
-    def recent_post_submolts(self, n: int = 10) -> list[str]:
-        """Submolts used in recent posts, for diversity tracking."""
-        return [
-            d.get("post_submolt", "")
-            for d in self._decisions[-30:]
-            if d.get("action") == "POST" and d.get("post_submolt")
-        ][:n]
+    def recent_post_submolts(self, n: int = 15) -> list[str]:
+        """Return the N most recently used distinct post submolts, scanning all history.
+
+        Using distinct values means a submolt stays excluded until N newer
+        submolts have been used, preventing the bot from cycling back to a
+        favourite after only a handful of posts.
+        """
+        seen: set[str] = set()
+        result: list[str] = []
+        for d in reversed(self._decisions):
+            submolt = d.get("post_submolt", "")
+            if d.get("action") == "POST" and submolt and submolt not in seen:
+                seen.add(submolt)
+                result.append(submolt)
+                if len(result) >= n:
+                    break
+        return result
 
     @property
     def post_count(self) -> int:
         return sum(1 for d in self._decisions if d.get("action") == "POST")
+
+    # ------------------------------------------------------------------
+    # Own-post watch queue
+    # ------------------------------------------------------------------
+
+    def add_watched_post(
+        self, post_id: str, content: str, initial_interval: int = 300
+    ) -> None:
+        """Register a newly created post for comment monitoring."""
+        now = time.time()
+        self._watched_posts[post_id] = WatchedPost(
+            post_id=post_id,
+            content=content,
+            posted_at=now,
+            next_check_at=now + initial_interval,
+            check_interval=initial_interval,
+        )
+
+    def get_posts_due_for_check(self, now: float | None = None) -> list[WatchedPost]:
+        """Return watched posts whose next_check_at has passed, oldest first."""
+        if now is None:
+            now = time.time()
+        due = [wp for wp in self._watched_posts.values() if wp.next_check_at <= now]
+        return sorted(due, key=lambda wp: wp.posted_at)
+
+    def update_watched_post(
+        self,
+        post_id: str,
+        seen_ids: list[str],
+        new_interval: int,
+        check_count: int,
+    ) -> None:
+        """Update a watched post after a check."""
+        wp = self._watched_posts.get(post_id)
+        if wp is None:
+            return
+        wp.seen_comment_ids = seen_ids
+        wp.next_check_at = time.time() + new_interval
+        wp.check_interval = new_interval
+        wp.check_count = check_count
+
+    def remove_watched_post(self, post_id: str) -> None:
+        """Remove a post from the watch queue (max checks reached)."""
+        self._watched_posts.pop(post_id, None)

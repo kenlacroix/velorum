@@ -93,6 +93,14 @@ _CONTEXT_OPS: dict[str, str] = {
     "sum": "add",
     "together": "add",
     "remaining": "subtract",
+    "remains": "subtract",
+    "product": "multiply",   # "what product" challenges
+    "each": "multiply",      # distributive: "N facets each M photons"
+    # Physics problems — the question type determines the operation
+    "impulse": "multiply",   # impulse = force × time
+    "torque": "multiply",    # torque = force × lever arm
+    "work": "multiply",      # work = force × distance
+    "momentum": "multiply",  # momentum = mass × velocity
 }
 
 # Implicit operation + operand (no separate number follows)
@@ -114,8 +122,8 @@ _SKIP_WORDS = frozenset({
 })
 
 # Prepositions/articles that turn a following small number word into a
-# determiner rather than a numeral: "in one claw", "the other one", etc.
-_DETERMINER_PREV = frozenset({"in", "the", "another", "each", "every", "per"})
+# determiner rather than a numeral: "in one claw", "but one claw loses", etc.
+_DETERMINER_PREV = frozenset({"in", "the", "another", "each", "every", "per", "but", "with", "no"})
 
 
 def _collapse_runs(s: str) -> str:
@@ -144,10 +152,12 @@ def deobfuscate(text: str) -> str:
 
     The obfuscation inserts random non-letter chars between and around
     letters, and mixes case. We strip everything except letters, digits,
-    spaces, and periods, then normalize whitespace and lowercase.
+    spaces, periods, and explicit operator symbols (* +).
     """
-    # Keep only letters, digits, whitespace, and decimal points between digits
-    cleaned = re.sub(r"[^a-zA-Z0-9\s.]", "", text)
+    # Pad * and + with spaces so they tokenize as standalone operators
+    cleaned = re.sub(r"([*+])", r" \1 ", text)
+    # Keep only letters, digits, whitespace, decimal points, *, and +
+    cleaned = re.sub(r"[^a-zA-Z0-9\s.*+]", "", cleaned)
     # Remove periods that aren't between digits (e.g. "lo.bs" → "lobs")
     cleaned = re.sub(r"(?<!\d)\.|\.(?!\d)", "", cleaned)
     # Collapse multiple spaces
@@ -155,15 +165,39 @@ def deobfuscate(text: str) -> str:
     return cleaned.lower()
 
 
+def _fuzzy_recover_word(word: str) -> str | None:
+    """Try to recover a known word by removing one inserted character.
+
+    Handles obfuscation like "sevenvty" → "seventy" where a single
+    foreign character is inserted.  Tries removing each position and
+    checks the collapsed result against _COLLAPSED_LOOKUP.
+
+    Returns the canonical word if found, else None.
+    Only attempts recovery for words longer than 3 characters to avoid
+    false positives on short tokens.
+    """
+    if len(word) <= 3:
+        return None
+    for pos in range(len(word)):
+        candidate = word[:pos] + word[pos + 1:]
+        collapsed = _collapse_runs(candidate)
+        canonical = _COLLAPSED_LOOKUP.get(collapsed)
+        if canonical:
+            return canonical
+    return None
+
+
 def _deduplicate_words(text: str) -> str:
-    """Recover words garbled by letter-doubling obfuscation.
+    """Recover words garbled by letter-doubling or single-char insertion.
 
     Moltbook sometimes doubles or triples each letter in a word:
     "lOoBbSsTtEeR" → "loobbsstteer" → should be "lobster".
 
-    For each token, collapse consecutive duplicate characters and check
-    if the collapsed form matches a known word (number, operation, etc.).
-    If so, replace with the canonical word.
+    It may also insert a single extra character: "sevenvty" → "seventy".
+
+    For each token:
+    1. Collapse consecutive duplicate characters and check against known words.
+    2. If not found, try removing each character one at a time (fuzzy recovery).
     """
     words = text.split()
     result: list[str] = []
@@ -173,7 +207,8 @@ def _deduplicate_words(text: str) -> str:
         if canonical:
             result.append(canonical)
         else:
-            result.append(word)
+            fuzzy = _fuzzy_recover_word(word)
+            result.append(fuzzy if fuzzy else word)
     return " ".join(result)
 
 
@@ -244,6 +279,11 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
     numbers: list[float] = []
     operations: list[str] = []
     pending_op: str | None = None
+    # After an implicit op like "doubles" (which already supplies ×2),
+    # the phrase "by two" that often follows must not be re-parsed as a
+    # separate operand.  We store the implicit operand value here and skip
+    # any number token whose value matches it.
+    skip_implicit_number: float | None = None
     context_op = _detect_context_op(text)
     fallback_op = context_op or "add"
     i = 0
@@ -257,8 +297,21 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
             if numbers:
                 operations.append(op)
                 numbers.append(implicit_val)
+            skip_implicit_number = implicit_val
             i += 1
             pending_op = None
+            continue
+
+        # Literal operator symbols preserved from challenge text
+        if word == "*":
+            pending_op = "multiply"
+            skip_implicit_number = None
+            i += 1
+            continue
+        if word == "+":
+            pending_op = "add"
+            skip_implicit_number = None
+            i += 1
             continue
 
         # Two-word operation phrases ("takes away", "gives away", etc.)
@@ -266,12 +319,14 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
             two_word = f"{word} {words[i + 1].strip('.,!?;:')}"
             if two_word in _TWO_WORD_OPS:
                 pending_op = _TWO_WORD_OPS[two_word]
+                skip_implicit_number = None  # explicit op clears the guard
                 i += 2
                 continue
 
         # Single-word operation
         if word in _OP_LOOKUP:
             pending_op = _OP_LOOKUP[word]
+            skip_implicit_number = None  # explicit op clears the guard
             i += 1
             continue
 
@@ -315,13 +370,38 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
         digit_match = re.match(r"\d+(?:\.\d+)?$", word)
         if digit_match:
             value = float(digit_match.group())
-            if numbers and pending_op:
-                operations.append(pending_op)
+            # Skip the number if it echoes an implicit operand ("doubles by 2")
+            if skip_implicit_number is not None and value == skip_implicit_number:
+                skip_implicit_number = None
+                i += 1
+                continue
+            skip_implicit_number = None
+            # "N times" adverbial look-ahead: "strikes five times" → ×N
+            # Only when "times" is NOT followed by another number — if it is,
+            # "X times Y" is a binary multiply and "times" should stay for the
+            # normal op-word loop to handle.
+            next_i = i + 1
+            effective_op = pending_op
+            if next_i < len(words) and words[next_i].strip(".,!?;:") == "times":
+                after_times_idx = next_i + 1
+                after_times = (
+                    words[after_times_idx].strip(".,!?;:")
+                    if after_times_idx < len(words)
+                    else ""
+                )
+                number_follows = after_times in WORD_NUMBERS or bool(
+                    re.match(r"\d+(?:\.\d+)?$", after_times)
+                )
+                if not number_follows:
+                    effective_op = "multiply"
+                    next_i += 1  # consume "times"
+            if numbers and effective_op:
+                operations.append(effective_op)
             elif numbers:
                 operations.append(fallback_op)
             numbers.append(value)
             pending_op = None
-            i += 1
+            i = next_i
             continue
 
         # Word number (with compound look-ahead)
@@ -341,16 +421,38 @@ def _parse_expression(text: str) -> tuple[list[float], list[str]]:
                     if next_val == 100 or next_val == 1000:
                         # "three hundred" = 300
                         value *= next_val
-                    elif next_val < value and value >= 20:
-                        # "twenty three" = 23
+                    elif next_val < value and value >= 20 and value % 10 == 0:
+                        # "twenty three" = 23 (only when tens-place is clean)
                         value += next_val
                     else:
                         break
                     j += 1
                 else:
                     break
-            if numbers and pending_op:
-                operations.append(pending_op)
+            # Skip the number if it echoes an implicit operand ("doubles by two")
+            if skip_implicit_number is not None and value == skip_implicit_number:
+                skip_implicit_number = None
+                i = j
+                continue
+            skip_implicit_number = None
+            # "N times" adverbial look-ahead: "strikes five times" → ×N
+            # Only when "times" is NOT followed by another number.
+            effective_op = pending_op
+            if j < len(words) and words[j].strip(".,!?;:") == "times":
+                after_times_idx = j + 1
+                after_times = (
+                    words[after_times_idx].strip(".,!?;:")
+                    if after_times_idx < len(words)
+                    else ""
+                )
+                number_follows = after_times in WORD_NUMBERS or bool(
+                    re.match(r"\d+(?:\.\d+)?$", after_times)
+                )
+                if not number_follows:
+                    effective_op = "multiply"
+                    j += 1  # consume "times"
+            if numbers and effective_op:
+                operations.append(effective_op)
             elif numbers:
                 operations.append(fallback_op)
             numbers.append(value)

@@ -46,6 +46,9 @@ def build_decision_prompt(
     web_search_context: str = "",
     our_name: str = "",
     entropy_context: str = "",
+    hot_posts_context: str = "",
+    ledger_context: str = "",
+    elite_bots_context: str = "",
 ) -> str:
     """Build the user message for the decision prompt."""
     responded = responded_post_ids or set()
@@ -54,7 +57,7 @@ def build_decision_prompt(
     for post in posts:
         already = " [ALREADY RESPONDED — do NOT pick this post]" if post.id in responded else ""
         is_own_post = our_name_lower and post.author.lower() == our_name_lower
-        own_tag = " [YOUR POST — self-reply ok, but do NOT set parent_comment_id here]" if is_own_post else ""
+        own_tag = " [YOUR POST — do NOT select for RESPOND; replies to others' comments handled separately]" if is_own_post else ""
         has_comment_data = post_comments and post.id in post_comments
         thread_tag = " [comment-replies available]" if has_comment_data else " [top-level only — no comment data]"
         block = (
@@ -196,6 +199,29 @@ Use this intelligence to choose WHO to engage. Prefer bots who reply back. Avoid
 {bot_profiles_context}
 """
 
+    hot_threads_section = ""
+    if hot_posts_context:
+        hot_threads_section = f"""
+# HOT THREADS (prioritize these)
+These posts have active discussion — especially any marked PRIORITY (someone replied to your comment).
+{hot_posts_context}
+"""
+
+    elite_bots_section = ""
+    if elite_bots_context:
+        elite_bots_section = f"""
+# ELITE BOT TARGETING
+These bots are intelligent and responsive — engaging them has high value.
+{elite_bots_context}
+"""
+
+    ledger_section = ""
+    if ledger_context:
+        ledger_section = f"""
+# CONVERSATION LEDGER (recent exchanges)
+{ledger_context}
+"""
+
     submolt_tones_section = ""
     if submolt_tone_context:
         submolt_tones_section = f"""
@@ -215,9 +241,9 @@ Use these as jumping-off points for your own take — don't just summarize.
     self_reply_rule = ""
     if our_name:
         self_reply_rule = f"""
-For your own posts (marked [YOUR POST]): you may add a top-level follow-up (self-reply). Do NOT set \
-`parent_comment_id` on your own posts — threaded replies to other bots' comments on your posts are \
-handled automatically by the conversation tracker.
+Do NOT select your own posts (marked [YOUR POST]) for RESPOND. \
+Replies to comments other bots leave on your posts are handled separately by the conversation tracker. \
+Selecting your own post for RESPOND means talking to yourself — always choose OBSERVE instead.
 """
 
     entropy_section = ""
@@ -227,7 +253,7 @@ handled automatically by the conversation tracker.
     return f"""\
 # SOUL
 {soul}
-{entropy_section}{mission_section}{strategy_section}{personality_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}{web_search_section}
+{entropy_section}{mission_section}{strategy_section}{personality_section}{hot_threads_section}{elite_bots_section}{bot_profiles_section}{submolts_section}{submolt_tones_section}{insights_section}{conversations_section}{ledger_section}{web_search_section}
 # MEMORY SUMMARY
 Posts responded to recently:
 {recent_responses_summary or "None yet."}
@@ -260,9 +286,18 @@ Posts ignored:
 Set parent_comment_id to null.
 Read ALL existing comments first — your comment must add something NEW not already said.
 If the discussion is saturated, prefer a different post or OBSERVE.
-Write as someone who has a genuine opinion on the topic.
-Don't agree/summarize/repeat. Add a unique angle, push back, or ask something specific.
-Ask a follow-up question or add a new angle — your goal is to START a conversation.
+
+CRITICAL — Stay on-topic:
+Your response_text MUST engage with what THIS POST actually says — its specific examples, claims, framing, or questions.
+DO NOT drift to a tangential subject. If the post is about submolt design failures, your comment must be about submolt design failures.
+Reference something concrete from the post — a specific point the author made, an example they used, or a question they asked.
+A comment that ignores the post's content and talks about something adjacent is worse than OBSERVE.
+
+Write as someone who genuinely read and thought about this specific post:
+- Challenge or build on one of the author's specific claims
+- Add an angle the author missed (that is still ON THIS TOPIC)
+- Ask a follow-up question about something specific they said
+Do NOT agree/summarize/repeat. Your goal is to START a conversation about what this post is actually about.
 
 **Mode A2 — Reply to a specific comment [only for posts marked "comment-replies available"]**
 Set parent_comment_id to THAT COMMENT'S ID (copy exactly from [id] in the comment list).

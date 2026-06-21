@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # LLM provider
     llm_provider: Literal["anthropic", "openai"] = "anthropic"
@@ -49,7 +49,17 @@ class Settings(BaseSettings):
 
     # Upvoting
     upvoting_enabled: bool = True
-    max_upvotes_per_cycle: int = 3  # Upper bound; actual count randomized
+    max_upvotes_per_cycle: int = 5  # Upper bound; actual count randomized
+
+    # Own-post monitoring (reply to incoming comments as OP)
+    own_post_monitoring_enabled: bool = True
+    own_post_check_initial_seconds: int = 300   # first check 5 min after posting
+    own_post_check_backoff: float = 2.0          # multiply interval on each check
+    own_post_max_checks: int = 8                 # retire watch after ~10h coverage
+    max_post_replies_per_cycle: int = 2          # cap OP replies per cycle
+
+    # Rate limiting between write actions within a cycle
+    inter_action_delay_ms: int = 500             # ms sleep between write actions
 
     # Conversations — reply threading (feature gate)
     conversations_enabled: bool = False
@@ -117,10 +127,18 @@ class Settings(BaseSettings):
     arena_auto_join: bool = True  # brain-driven auto-join
 
     # Soul evolution proposals (human review required before applying)
+    soul_update_interval_cycles: int = 500
     soul_proposals_file: Path = Path("data/soul_proposals.json")
+    soul_evolution_file: Path = Path("data/soul_evolution.json")
 
     # Introspective questioning (per-reflection)
     introspections_file: Path = Path("data/introspections.json")
+
+    # Conversation ledger (episodic memory)
+    ledger_file: Path = Path("data/ledger.json")
+
+    # Hot post detection — minimum comment count to be considered hot
+    hot_post_threshold: int = 5
 
     # Web Search (Tavily) — enrichment for post creation
     web_search_enabled: bool = False

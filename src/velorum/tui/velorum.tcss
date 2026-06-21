@@ -47,9 +47,21 @@ ActivityLog {
     height: 100%;
 }
 
+/* Narrator: the prominent "bot is thinking" space */
+#narrator {
+    height: 1fr;
+    padding: 1 2;
+    background: $surface;
+    border-bottom: solid $surface-lighten-2;
+    color: $text;
+}
+
+/* History log: compact scrollable record at the bottom */
 ActivityLog RichLog {
-    height: 100%;
+    height: 7;
     scrollbar-size: 1 1;
+    background: $background;
+    color: $text-muted;
 }
 
 /* ── Bottom Pane (full width, tabbed) ───────────────── */
@@ -174,6 +186,25 @@ MissionPanel Static {
 #btn-clear-mission {
     width: auto;
     min-width: 8;
+}
+
+/* ── Orchestrator Panel ─────────────────────────────── */
+
+OrchestratorPanel {
+    height: 100%;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+OrchestratorPanel Static {
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+#orch-divider1, #orch-divider2, #orch-divider3, #orch-divider4, #orch-divider5 {
+    color: $surface-lighten-2;
+    height: 1;
 }
 
 /* ── Footer ─────────────────────────────────────────── */
