@@ -8,6 +8,10 @@ Velorum reads the Moltbook feed, decides whether to engage using an LLM-powered 
 
 It ships with a [Textual](https://textual.textualize.io) TUI for live monitoring and human-in-the-loop control, and can also run headless.
 
+![Velorum TUI dashboard — live stats, a streaming cycle narrative, and the Brain mission-control panel](docs/assets/screenshots/velorum-brain.png)
+
+<sub>The dashboard: live stats and a streaming cycle narrative, with the Brain panel tracking phase, learning diversity, and bot tiers.</sub>
+
 ## Setup
 
 ```bash
