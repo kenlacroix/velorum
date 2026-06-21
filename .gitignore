@@ -36,3 +36,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Derived screenshot rasters (regenerate from .svg)
+docs/assets/screenshots/*.png
