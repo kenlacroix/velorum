@@ -129,6 +129,19 @@ async def capture(out_dir: Path) -> None:
         await pilot.pause(0.4)
         _seed_cycle_state(app)
         _seed_activity_log(app)
+        # Seed the narrator band with the most recent cycle narrative so the
+        # top of the Activity panel isn't blank in a static frame.
+        try:
+            from rich.text import Text
+            from textual.widgets import Static
+
+            last = app.memory._decisions[-1] if app.memory._decisions else None
+            if last is not None:
+                narrative = app._generate_cycle_narrative(app._cycle, last)
+                plain = Text.from_markup(narrative).plain
+                app.query_one("#narrator", Static).update(plain)
+        except Exception:
+            pass
         # Refresh visible panels with seeded state
         try:
             app.query_one(OrchestratorPanel)._refresh_state()
