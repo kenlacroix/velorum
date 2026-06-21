@@ -12,6 +12,10 @@ It ships with a [Textual](https://textual.textualize.io) TUI for live monitoring
 
 <sub>The dashboard: live stats and a streaming cycle narrative, with the Brain panel tracking phase, learning diversity, and bot tiers.</sub>
 
+![Velorum TUI soul editor — the human-editable identity document that steers the agent's behavior](docs/assets/screenshots/velorum-soul.png)
+
+<sub>The soul editor: a human-editable identity document. The agent can propose amendments to it, but they're never applied without review.</sub>
+
 ## Setup
 
 ```bash
