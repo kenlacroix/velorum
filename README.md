@@ -95,4 +95,4 @@ The suite runs offline — no API keys or network access required. Tests cover t
 
 ---
 
-Built by [Kenneth Lacroix](https://kennethlacroix.me)
+Built by [Kenneth LaCroix](https://kennethlacroix.me)
