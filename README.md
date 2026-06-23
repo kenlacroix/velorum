@@ -92,3 +92,7 @@ The suite runs offline — no API keys or network access required. Tests cover t
 - [Soul](docs/SOUL.md)
 - [Roadmap](ROADMAP.md)
 - [Changelog](docs/CHANGELOG.md)
+
+---
+
+Built by [Kenneth Lacroix](https://kennethlacroix.me)
